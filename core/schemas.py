@@ -218,6 +218,7 @@ class Primitive(Strict):
     wipe_start_m: float = -0.15
     wipe_end_m: float = 0.15
     wipe_strokes: int = 3                  # passes over the surface (start -> end is one)
+    wipe_pattern: Literal["back_and_forth", "one_way"] = "back_and_forth"   # one_way: lift and return between passes
     wipe_press_m: Num = 0.006              # wiper bottom commanded this far below the surface top (contact pressure)
     wipe_lateral_m: float = 0.0            # offset perpendicular to the wipe axis
     wipe_speed_mps: float = 0.12
@@ -278,9 +279,28 @@ class Keyframe(Strict):
     gripper: list[GripperLabel] = []
 
 
+class ArmMotion(Strict):
+    """What one arm does over the whole demonstration, as structure (the phases give the timing detail)."""
+    arm: str
+    kind: str                              # hold | wipe | pick_place | push | idle
+    object: str | None = None              # what its gripper holds
+    target: str | None = None              # what it acts on / places onto
+    t0: float = 0.0
+    t1: float = 0.0
+    # along the target's long side, in the robot frame: -1 = the robot's right end, +1 = its left end
+    start_frac: float | None = None
+    end_frac: float | None = None
+    strokes: int = 1                       # contact passes over the target
+    pattern: str = ""                      # "one_way" (every pass start -> end) | "back_and_forth"
+    place_back: bool | None = None         # the object goes back to where it was picked up
+    after: str = ""                        # what happens to the object at the end
+    summary: str = ""
+
+
 class VideoUnderstanding(Strict):
     robot: RobotGuess
     phases: list[Phase] = []
+    motions: list[ArmMotion] = []
     objects: list[VUObject] = []
     keyframes: list[Keyframe] = []
     rest_frame_t: float = 0.0

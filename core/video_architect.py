@@ -22,7 +22,8 @@ from core.argon import ARGON, ROBOTICS_ER, STATE as STATE_DIR, Argon, run_parall
 from core.mjcf_compiler import MENAGERIE
 from core.schemas import Keyframe, VideoUnderstanding
 
-SHAPES = "box, cylinder, sphere, capsule, tblock (T-shaped block), container (open bin/box/tray)"
+SHAPES = ("box, cylinder, sphere, capsule, tblock (T-shaped block), container (open bin/box/tray), "
+          "rail (a bar or handle: a horizontal rod on two end posts)")
 
 SYSTEM = """You are the Video Architect of WorldGym, a system that turns one video of a robot doing a tabletop
 manipulation task into a physics twin in MuJoCo. You watch the video and keyframes carefully and report what is
@@ -122,6 +123,14 @@ Produce:
   of the candidate whose shape and size match; null when nothing matches (bars, custom fixtures, plain blocks).
 - phases: contiguous phases covering the task, with t0, t1, action (one of reach, grasp, lift, transit, place,
   release, retract, push, idle), arm ("arm" for single-arm robots, "left"/"right" for dual-arm), object, target.
+- motions: one entry per arm summarising what it does over the whole clip (the structure the simulation must
+  reproduce): kind (hold, wipe, pick_place, push, idle), object (in its gripper), target, t0/t1, and for contact
+  motions start_frac / end_frac = where the tool starts and ends along the target's long side (-1 = the robot's
+  right end, +1 = its left end), strokes = number of passes over the target, pattern = "one_way" when every pass
+  goes the same direction (e.g. repeated right-to-left swipes, lifting back between them, or one sweep that
+  progresses right to left) or "back_and_forth" when it scrubs both ways, place_back = whether the object returns
+  to where it was picked, after = what happens to it at the end (e.g. "moved straight right and dropped on the
+  mat"), summary = one sentence. Watch the direction carefully; do not assume back-and-forth.
 - keyframes: exactly one entry per attached keyframe, using its exact t: robot_box, object_boxes for every visible
   object id, gripper = [{{arm, uv, open, held}}] (held = object id or null).
 - rest_frame_t: one of the keyframe times where the robot is at a rest/home pose and fully visible.

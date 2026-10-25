@@ -6,14 +6,15 @@ positions with the solved camera and re-extracts the motion from the labelling s
 """
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
 
 from core.mjcf_compiler import object_height
 from core.motion_extract import DEPTH, _across
-from core.schemas import (AssetRef, ObjectSpec, PolicyConfig, Predicate, Primitive, RobotAdapter, TaskSpec,
-                          VideoUnderstanding)
+from core.schemas import (ArmMotion, AssetRef, ObjectSpec, Part, PolicyConfig, Predicate, Primitive, RobotAdapter,
+                          TaskSpec, VideoUnderstanding)
 from core.scene_build import SceneDraft, _finish_assets, colour_rgba
 
 PRIMS = ("box", "cylinder", "sphere", "capsule", "tblock", "container")
@@ -51,13 +52,16 @@ def scene_from_vu(vu: VideoUnderstanding, adapter: RobotAdapter) -> SceneDraft:
         size = (list(o.size_guess_m) + [o.size_guess_m[-1]] * 3)[:3]
         if o.long_axis in ("x", "y") and (size[0] >= size[1]) != (o.long_axis == "x"):
             size[0], size[1] = size[1], size[0]          # the size guess must agree with the stated long axis
-        if o.id in grasped and o.type not in ("sphere", "cylinder"):
-            k = 0 if size[0] < size[1] else 1                 # sponges compress, rails are thinner than their posts
+        if o.id in grasped and o.type not in ("sphere", "cylinder", "rail"):
+            k = 0 if size[0] < size[1] else 1                 # a grasped sponge compresses between the fingers
             size[k] = min(size[k], fit)
         fixed = o.fixed or o.id in wiped
         kw = dict(id=o.id, colour=colour_rgba(o.colour), xy=[round(float(v), 4) for v in xy], is_fixed=fixed,
                   is_obstacle=o.id not in tools and o.id not in surfaces and o.type != "container")
-        if o.asset:
+        if o.type == "rail":
+            objs.append(ObjectSpec(shape="composite", dims_m=[round(v, 4) for v in size], yaw=round(base_yaw, 4),
+                                   parts=rail_parts(size, min(0.025, fit)), friction=0.6, **kw))
+        elif o.asset:
             objs.append(ObjectSpec(shape="mesh", dims_m=[round(v, 4) for v in size], yaw=round(base_yaw, 4),
                                    asset=AssetRef(name=o.asset, url=o.asset), **kw))
         else:
@@ -78,18 +82,115 @@ def scene_from_vu(vu: VideoUnderstanding, adapter: RobotAdapter) -> SceneDraft:
     return _finish_assets(draft)
 
 
+def rail_parts(size: list[float], rod_d: float) -> list[Part]:
+    """A bar / handle: two end posts, two uprights and a rod on top, filling exactly the given bounding box."""
+    a = 0 if size[0] >= size[1] else 1            # long axis in the object frame
+    L, W, H = size[a], size[1 - a], size[2]
+    post_l, post_h = 0.13 * L, 0.45 * H
+    up_h = H - post_h - rod_d
+
+    def at(along: float, z: float) -> list[float]:
+        v = [0.0, 0.0, round(z, 4)]
+        v[a] = round(along, 4)
+        return v
+
+    def ext(along: float, across: float, h: float) -> list[float]:
+        d = [0.0, 0.0, round(h, 4)]
+        d[a], d[1 - a] = round(along, 4), round(across, 4)
+        return d
+
+    parts = []
+    for sgn in (-1, 1):
+        c = sgn * (L / 2 - post_l / 2)
+        parts.append(Part(shape="box", dims_m=ext(post_l, W, post_h), pos=at(c, -H / 2 + post_h / 2)))
+        parts.append(Part(shape="cylinder", dims_m=[rod_d, rod_d, round(up_h, 4)],
+                          pos=at(c, -H / 2 + post_h + up_h / 2)))
+    rod = Part(shape="capsule", dims_m=[rod_d, rod_d, round(L - post_l, 4)], pos=at(0.0, H / 2 - rod_d / 2),
+               euler=[0.0, round(math.pi / 2, 4), 0.0] if a == 0 else [round(math.pi / 2, 4), 0.0, 0.0])
+    return parts + [rod]
+
+
 def _top(o: ObjectSpec) -> float:
     return float(object_height(o))
 
 
+def _long_ax(o: ObjectSpec) -> np.ndarray:
+    if o.dims_m[0] >= o.dims_m[1]:
+        return np.array([math.cos(o.yaw), math.sin(o.yaw)])
+    return np.array([-math.sin(o.yaw), math.cos(o.yaw)])
+
+
+def frac_to_s(frac: float, t: ObjectSpec, adapter: RobotAdapter) -> float:
+    """Architect fraction along the target (-1 robot's right end, +1 its left end) -> metres along its long axis."""
+    _, _, left = robot_frame(adapter)
+    sign = 1.0 if float(_long_ax(t) @ left) >= 0 else -1.0
+    return float(np.clip(frac, -1.0, 1.0)) * sign * 0.42 * max(t.dims_m[0], t.dims_m[1])
+
+
+def motion_fields(m: ArmMotion, t: ObjectSpec, adapter: RobotAdapter) -> dict:
+    """Wipe fields that encode WHAT the demonstration does: where it starts and ends, how many passes, which way."""
+    up: dict = {}
+    if m.start_frac is not None and m.end_frac is not None:
+        up.update(wipe_start_m=round(frac_to_s(m.start_frac, t, adapter), 4),
+                  wipe_end_m=round(frac_to_s(m.end_frac, t, adapter), 4))
+    one_way = m.pattern == "one_way"
+    up["wipe_pattern"] = "one_way" if one_way else "back_and_forth"
+    up["wipe_strokes"] = int(min(max(m.strokes or 1, 1), 6))
+    if m.place_back is not None:
+        up["place_back"] = bool(m.place_back)
+    return up
+
+
+def align_with_motions(policy: PolicyConfig, task: TaskSpec, vu: VideoUnderstanding, adapter: RobotAdapter,
+                       keep_span: bool = False) -> PolicyConfig:
+    """Keep the architect's structure (direction, passes, pattern, place back). With keep_span (Gen 2) the
+    measured stroke span from the labels stays; only a span running the wrong way is flipped."""
+    obj = {o.id: o for o in task.objects}
+    by_arm = {m.arm: m for m in vu.motions if m.kind in ("wipe", "push") and m.target in obj}
+    prims = []
+    for p in policy.primitives:
+        m = by_arm.get(p.arm)
+        if p.kind == "wipe" and m is not None:
+            up = motion_fields(m, obj[m.target], adapter)
+            if keep_span and "wipe_start_m" in up:
+                want = np.sign(up["wipe_end_m"] - up["wipe_start_m"])
+                have = np.sign(p.wipe_end_m - p.wipe_start_m)
+                up["wipe_start_m"], up["wipe_end_m"] = ((p.wipe_start_m, p.wipe_end_m) if want == have or not want
+                                                        else (p.wipe_end_m, p.wipe_start_m))
+            p = p.model_copy(update=up)
+        prims.append(p)
+    return policy.model_copy(update={"primitives": [_physical(p, prims, obj) for p in prims]})
+
+
+def _physical(p: Primitive, prims: list[Primitive], obj: dict[str, ObjectSpec]) -> Primitive:
+    """Keep a wipe physically possible: a thin tool is grasped above the table, and the strokes stop short of where
+    another arm is holding the same target."""
+    if p.kind != "wipe" or p.object_id not in obj or p.target_id not in obj:
+        return p
+    up = {"grasp_z_depth_m": round(min(p.grasp_z_depth_m or DEPTH, 0.45 * _top(obj[p.object_id])), 4)}
+    t = obj[p.target_id]
+    a = 0 if t.dims_m[0] >= t.dims_m[1] else 1
+    for h in prims:
+        if h.kind == "hold" and h.object_id == p.target_id and h.arm != p.arm:
+            sh = float(h.grasp_xy_offset_m[a])
+            lim = sh - 0.08 if sh > 0 else sh + 0.08
+            clip = (lambda v: min(v, lim)) if sh > 0 else (lambda v: max(v, lim))
+            up.update(wipe_start_m=round(clip(p.wipe_start_m), 4), wipe_end_m=round(clip(p.wipe_end_m), 4))
+    return p.model_copy(update=up)
+
+
+
 def policy_from_phases(task: TaskSpec, vu: VideoUnderstanding, adapter: RobotAdapter) -> PolicyConfig:
-    """The architect's phases as primitives: a held surface -> hold, a tool pressed on a target -> wipe,
-    an object carried to a target -> pick_place."""
+    """The architect's understanding as primitives: a held surface -> hold, a tool pressed on a target -> wipe,
+    an object carried to a target -> pick_place. The per-arm motion structure sets direction, passes and pattern."""
     bases = arm_bases(adapter)
     names = [a.name for a in adapter.arms]
     obj = {o.id: o for o in task.objects}
     prims, holding = [], None
     wipes = {}     # arm -> (tool, target)
+    for m in vu.motions:
+        if m.kind in ("wipe", "push") and m.object in obj and m.target in obj:
+            wipes.setdefault(m.arm if m.arm in names else names[0], (m.object, m.target))
     for p in vu.phases:
         arm = p.arm if p.arm in names else names[0]
         if p.action in ("push", "wipe") and p.object in obj and p.target in obj:
@@ -107,7 +208,7 @@ def policy_from_phases(task: TaskSpec, vu: VideoUnderstanding, adapter: RobotAda
         along_x = o.dims_m[0] >= o.dims_m[1]
         ax = np.array([math.cos(o.yaw), math.sin(o.yaw)]) if along_x else np.array([-math.sin(o.yaw), math.cos(o.yaw)])
         side = float(np.sign((bases.get(arm, np.zeros(2)) - np.array(o.xy)) @ ax) or -1.0)
-        s = side * 0.38 * L
+        s = side * 0.4 * L
         top = _top(o)
         prims.append(Primitive(kind="hold", arm=arm, object_id=o.id,
                                grasp_xy_offset_m=[round(s, 4), 0.0] if along_x else [0.0, round(s, 4)],
@@ -142,7 +243,7 @@ def policy_from_phases(task: TaskSpec, vu: VideoUnderstanding, adapter: RobotAda
     if holding:
         prims = [x.model_copy(update={"sync_after": holding}) if x.arm != holding and x.kind != "hold" else x
                  for x in prims]
-    return PolicyConfig(name="gen1", primitives=prims)
+    return align_with_motions(PolicyConfig(name="gen1", primitives=prims), task, vu, adapter)
 
 
 def refine_positions(task: TaskSpec, measured: dict, max_shift_m: float = 0.2) -> tuple[TaskSpec, dict]:
@@ -159,3 +260,14 @@ def refine_positions(task: TaskSpec, measured: dict, max_shift_m: float = 0.2) -
                 continue
         objs.append(o)
     return task.model_copy(update={"objects": objs}), moved
+
+
+def demonstrated_motion(vu: VideoUnderstanding) -> str:
+    """The architect's per-arm structure, stated as fixed facts for the critic."""
+    if not vu.motions:
+        return ""
+    rows = [m.model_dump(exclude_none=True) for m in vu.motions]
+    return ("Demonstrated motion per arm (from the Video Architect). This is WHAT happens and is fixed: keep each "
+            "arm's role, the stroke direction (start_frac -> end_frac, -1 = the robot's right end, +1 = its left "
+            "end), the number of passes, the pattern (one_way / back_and_forth) and place_back; fix HOW it is done "
+            "(grasp points, heights, speeds, positions):\n" + json.dumps(rows))

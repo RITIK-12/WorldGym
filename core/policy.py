@@ -342,9 +342,14 @@ class _Strokes(_Move):
     def _next(self):
         ex = self.ex
         g = ex.ctx["wipe"]
-        pt = g["end"] if self.k % 2 == 0 else g["start"]
         _, R = ex.ctrl.cmd_pose()
-        ex.ctrl.move([[pt[0], pt[1], g["z"]]], ex.ctrl.tcp_yaw(R), ex.p.wipe_speed_mps)
+        if ex.p.wipe_pattern == "one_way" and self.k > 0:   # lift, return above the start, press, swipe again
+            (ex_, ey), (sx, sy), z, hz = g["end"], g["start"], g["z"], g["hover"]
+            path = [[ex_, ey, hz], [sx, sy, hz], [sx, sy, z], [ex_, ey, z]]
+        else:
+            pt = g["end"] if self.k % 2 == 0 or ex.p.wipe_pattern == "one_way" else g["start"]
+            path = [[pt[0], pt[1], g["z"]]]
+        ex.ctrl.move(path, ex.ctrl.tcp_yaw(R), ex.p.wipe_speed_mps)
 
     def step(self):
         done, _ = self.ex.ctrl.step_motion()

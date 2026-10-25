@@ -10,11 +10,11 @@ from pathlib import Path
 
 from core.argon import Argon
 from core.camera_track import camera_at
-from core.first_world import arm_bases, robot_frame
+from core.first_world import arm_bases, demonstrated_motion, robot_frame
 from core.mjcf_compiler import load_adapter
 from core.replay_critic import run_final_critic
 from core.runs import load_run
-from core.schemas import Keyframe, PolicyConfig, TaskSpec
+from core.schemas import Keyframe, PolicyConfig, TaskSpec, VideoUnderstanding
 from core.twin import end_pose_error, publish_gen, real_end_positions
 
 
@@ -37,7 +37,7 @@ def main(run_dir: str) -> None:
     origin, fwd, left = robot_frame(adapter)
     frame_txt = (f"World frame: the robot's forward is world {fwd.round(3).tolist()}, its left is world "
                  f"{left.round(3).tolist()}, origin {origin.round(3).tolist()}; arm bases "
-                 f"{ {k: v.round(3).tolist() for k, v in arm_bases(adapter).items()} }.")
+                 f"{ {k: v.round(3).tolist() for k, v in arm_bases(adapter).items()} }.\n" + demonstrated_motion(VideoUnderstanding.model_validate(vu)))
     argon = Argon(d / "argon")
     with run.stage("final_critic") as s:
         rc = run_final_critic(m.video, d / "architect/clip_small.mp4", task, draft, adapter, argon, grasp_t,

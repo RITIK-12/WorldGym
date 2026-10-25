@@ -27,7 +27,8 @@ from core.camera_track import camera_at, track_camera, track_overlay
 from core.fidelity import measure_footprint
 from core.mjcf_compiler import ROBOTS, scene_table
 from core.motion_extract import extract, extract_multi
-from core.first_world import arm_bases, policy_from_phases, refine_positions, robot_frame, scene_from_vu
+from core.first_world import (align_with_motions, arm_bases, demonstrated_motion, policy_from_phases,
+                              refine_positions, robot_frame, scene_from_vu)
 from core.replay_critic import run_final_critic
 from core.robot_onboard import onboard, self_test
 from core.rollout import build_sim, run_episode
@@ -258,6 +259,7 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
             draft1, log = pol1, {"segments": [], "error": str(e)[:300]}
         if not draft1.primitives:
             draft1 = pol1
+        draft1 = align_with_motions(draft1, task, vu, adapter, keep_span=True)
         run.write_json("motion/motion_extract.json", log)
         run.write_json("motion/draft1.json", draft1.model_dump())
         ep = run_episode(task, draft1, adapter)
@@ -279,7 +281,8 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
         origin, fwd, left = robot_frame(adapter)
         frame_txt = (f"World frame: the robot's forward is world {fwd.round(3).tolist()}, its left is world "
                      f"{left.round(3).tolist()}, origin {origin.round(3).tolist()}; arm bases "
-                     f"{ {k: v.round(3).tolist() for k, v in arm_bases(adapter).items()} }.")
+                     f"{ {k: v.round(3).tolist() for k, v in arm_bases(adapter).items()} }.\n"
+                     + demonstrated_motion(vu))
         rc = run_final_critic(video, run.path("architect/clip_small.mp4"), task, draft1, adapter, argon, grasp_t,
                               lambda t, e: end_pose_error(t, e, real_end)[0], run.path("final_critic"),
                               cam_at=cam_at, robot_frame=frame_txt)

@@ -254,13 +254,16 @@ def extract_multi(task: TaskSpec, labels: list[Keyframe], sim, w: int, h: int, c
                     continue
                 ss = np.clip(np.array(ss), -0.45 * L, 0.45 * L)
                 strokes = max(1, _reversals(ss) + 1)
+                forward = float(np.median(ss[-3:])) >= float(np.median(ss[:3]))
                 pick = d.xpos[ix.obj_body[obj.id]][:2].copy()
                 _set_cam(sim, cam_at, t_rel)
                 rp = _ray_plane_z(sim, rows[ri][1], w, h, held_below)
                 back = rp is None or float(np.linalg.norm(rp[:2] - pick)) < 0.08
                 prim = Primitive(kind="wipe", arm=arm, object_id=obj.id, target_id=tgt,
                                  grasp_yaw_mode="object_relative", grasp_yaw_rad=round(_across(obj), 4),
-                                 wipe_start_m=round(float(ss.min()), 4), wipe_end_m=round(float(ss.max()), 4),
+                                 # keep the demonstrated direction: start where the first samples are
+                                 wipe_start_m=round(float(ss.min() if forward else ss.max()), 4),
+                                 wipe_end_m=round(float(ss.max() if forward else ss.min()), 4),
                                  wipe_strokes=int(min(strokes, 8)), place_back=back,
                                  place_xy_offset_m=[0.0, 0.0] if back else [round(float(v), 4) for v in rp[:2]],
                                  post_grasp_lift_z_m=round(ttop + held_below + 0.08, 4),

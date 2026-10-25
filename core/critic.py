@@ -35,7 +35,8 @@ Fields of a primitive (numbers in metres / radians / newtons / m/s):
 
 Primitive kinds: "pick_place" (above), "hold" (grasp object_id and keep holding it until every other arm is done;
 hold_lift_m lifts it), "wipe" (grasp object_id = the wiper, press it onto target_id's top and stroke along the
-target's long axis between wipe_start_m and wipe_end_m (metres from the target centre), wipe_strokes passes at
+target's long axis between wipe_start_m and wipe_end_m (metres from the target centre), wipe_strokes passes (wipe_pattern "back_and_forth" alternates direction; "one_way" lifts and returns to the
+start between passes, so every pass goes start -> end) at
 wipe_speed_mps, wiper bottom wipe_press_m below the surface top (wipe_surface_z_m overrides the top), offset
 wipe_lateral_m across the axis; place_back returns the wiper to where it was picked). sync_after = an arm name: start
 only once that arm is holding (or idle). Two arms colliding is reported as ARM_ARM_COLLISION.
