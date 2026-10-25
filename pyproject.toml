@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.14.1",
     "python-dotenv>=1.2.4",
     "scipy>=1.18.1",
+    "usd-core>=26.11",
     "viser>=1.1.1",
 ]
 

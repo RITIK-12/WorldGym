@@ -31,3 +31,6 @@ benchmarks/*/held_out*
 
 # Local API spend ledger and response cache
 .worldgym/
+
+# Downloaded / converted library assets
+assets/simready/

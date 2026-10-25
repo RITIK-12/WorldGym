@@ -67,7 +67,19 @@ class RobotAdapter(Strict):
 # Task / scene
 # ----------------------------------------------------------------------------------------------------------------------
 
-Shape = Literal["box", "cylinder", "sphere", "capsule", "tblock", "container", "composite"]
+Shape = Literal["box", "cylinder", "sphere", "capsule", "tblock", "container", "composite", "mesh"]
+
+
+class AssetRef(Strict):
+    """A library asset used as an object's geometry (shape "mesh"); rescaled so its bounding box matches dims_m."""
+    source: str = "simready"
+    name: str                              # e.g. "cleaning_sponge_b01"
+    url: str                               # root USD of the asset package
+    license: str = "CC-BY-4.0"
+    attribution: str = ""
+    local_dir: str | None = None           # converted MuJoCo meshes (visual.obj, collision_*.obj, asset.json)
+    native_dims_m: list[float] | None = None
+    mass_kg: float | None = None
 
 
 class Part(Strict):
@@ -96,6 +108,7 @@ class ObjectSpec(Strict):
     stem_w_m: float | None = None          # tblock stem width (default = 0.4 * y extent)
     flange_d_m: float | None = None        # tblock flange depth along y (default = 0.4 * y extent)
     parts: list[Part] | None = None        # composite only
+    asset: AssetRef | None = None          # mesh only
     material: str | None = None
 
 
