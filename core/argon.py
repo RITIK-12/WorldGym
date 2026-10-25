@@ -7,13 +7,14 @@
 Every request writes a bundle runs/<id>/argon/<name>/{system.md, prompt.md, attachments/, response.json}.
 JSON hygiene: ask for ONE object, strip code fences, validate with pydantic, re-ask once with the validation error.
 
-Spend guard (live backend only). Identical requests are served from a content-addressed cache and never re-hit the
-API. Every live call or Managed Agent launch first checks hard caps and is appended to .worldgym/api_ledger.jsonl:
-  WORLDGYM_MAX_CALLS   (default 30)   live model calls per process
-  WORLDGYM_DAILY_CALLS (default 150)  live model calls per calendar day, across processes
-  WORLDGYM_DAILY_USD   (default 15)   estimated spend per day ($2 / 1M input, $10 / 1M output+thinking tokens)
-  WORLDGYM_DAILY_AGENTS (default 8)   Managed Agent launches per day
-thinking_level defaults to "medium"; max_output_tokens is capped per call (thinking + answer share it).
+Runaway-loop guard (live backend only; NOT a spend limit). Identical requests are served from a content-addressed
+cache and never re-hit the API. A process trips the guard when it makes more than WORLDGYM_MAX_CALLS (default 400)
+live calls, issues the same request name more than WORLDGYM_MAX_REPEAT (default 4) times, or launches more than
+WORLDGYM_MAX_AGENTS (default 16) Managed Agents. Every call is logged with its token usage to
+.worldgym/api_ledger.jsonl for the scorecard.
+
+Argon runs at thinking_level "high" with the full 65,536-token output window by default (thinking + answer share
+it). Media calls are synchronous; text-only calls run in background mode and may ask for more than 65,536 tokens.
 """
 from __future__ import annotations
 
@@ -24,11 +25,13 @@ import mimetypes
 import os
 import re
 import shutil
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import Callable, TypeVar
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError
@@ -38,12 +41,13 @@ REPO = Path(__file__).resolve().parents[1]
 ARGON = "gemini-4-argon"
 FLASH = "gemini-3.8-flash"
 LITE = "gemini-3.5-flash-lite"
+ROBOTICS_ER = "gemini-robotics-er-2-preview"   # spatial pointing / boxes: the dense-labelling subagent
 REPLAY_DIR = Path(os.environ.get("WORLDGYM_REPLAY_DIR", REPO / "replay_cache"))
 STATE = Path(os.environ.get("WORLDGYM_STATE", REPO / ".worldgym"))
 INLINE_VIDEO_MAX = 18 * 1024 * 1024
 POLL_S = 3.0
 TIMEOUT_S = 20 * 60
-DEFAULT_MAX_OUTPUT = 32768
+DEFAULT_MAX_OUTPUT = 65536
 USD_PER_M_IN, USD_PER_M_OUT = 2.0, 10.0
 
 T = TypeVar("T", bound=BaseModel)
@@ -72,8 +76,11 @@ class ArgonError(Exception):
     pass
 
 
-class BudgetExceeded(ArgonError):
-    pass
+class LoopGuardTripped(ArgonError):
+    """A runaway loop was detected (too many live calls / repeats / agents in one process)."""
+
+
+BudgetExceeded = LoopGuardTripped
 
 
 @dataclass
@@ -88,17 +95,18 @@ class CallLog:
 
 
 CALLS: list[CallLog] = []   # process-wide call log for the scorecard ("model calls")
+AGENT_LAUNCHES: list[str] = []
+_LOCK = threading.Lock()
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# Spend guard
+# Runaway-loop guard + usage ledger
 # ----------------------------------------------------------------------------------------------------------------------
 
 def _caps() -> dict:
-    return {"max_calls": int(os.environ.get("WORLDGYM_MAX_CALLS", 30)),
-            "daily_calls": int(os.environ.get("WORLDGYM_DAILY_CALLS", 150)),
-            "daily_usd": float(os.environ.get("WORLDGYM_DAILY_USD", 15)),
-            "daily_agents": int(os.environ.get("WORLDGYM_DAILY_AGENTS", 8))}
+    return {"max_calls": int(os.environ.get("WORLDGYM_MAX_CALLS", 400)),
+            "max_repeat": int(os.environ.get("WORLDGYM_MAX_REPEAT", 4)),
+            "max_agents": int(os.environ.get("WORLDGYM_MAX_AGENTS", 16))}
 
 
 def _ledger_path() -> Path:
@@ -123,21 +131,26 @@ def ledger_today() -> list[dict]:
 
 def spend_summary() -> dict:
     rows = ledger_today()
-    return {"day": date.today().isoformat(), "model_calls": sum(r["kind"] == "model" for r in rows),
-            "agents": sum(r["kind"] == "agent" for r in rows), "usd_est": round(sum(r.get("usd", 0) for r in rows), 3),
-            "process_live_calls": sum(1 for c in CALLS if c.backend == "gemini" and not c.cached), "caps": _caps()}
+    live = [c for c in CALLS if c.backend == "gemini" and not c.cached]
+    return {"day": date.today().isoformat(), "model_calls_today": sum(r["kind"] == "model" for r in rows),
+            "agents_today": sum(r["kind"] == "agent" for r in rows),
+            "usd_est_today": round(sum(r.get("usd", 0) for r in rows), 3),
+            "process_live_calls": len(live), "process_agents": len(AGENT_LAUNCHES), "guards": _caps()}
 
 
-def check_budget(kind: str = "model") -> None:
-    caps, s = _caps(), spend_summary()
-    if kind == "model" and s["process_live_calls"] >= caps["max_calls"]:
-        raise BudgetExceeded(f"per-process cap reached ({caps['max_calls']} live calls); raise WORLDGYM_MAX_CALLS")
-    if kind == "model" and s["model_calls"] >= caps["daily_calls"]:
-        raise BudgetExceeded(f"daily cap reached ({caps['daily_calls']} live calls); raise WORLDGYM_DAILY_CALLS")
-    if kind == "agent" and s["agents"] >= caps["daily_agents"]:
-        raise BudgetExceeded(f"daily agent cap reached ({caps['daily_agents']}); raise WORLDGYM_DAILY_AGENTS")
-    if s["usd_est"] >= caps["daily_usd"]:
-        raise BudgetExceeded(f"daily spend cap reached (~${s['usd_est']:.2f}); raise WORLDGYM_DAILY_USD")
+def check_budget(kind: str = "model", name: str | None = None) -> None:
+    """Trip on runaway loops only: total live calls, repeats of one request name, agent launches (per process)."""
+    caps = _caps()
+    with _LOCK:
+        live = [c for c in CALLS if c.backend == "gemini" and not c.cached]
+        if kind == "model" and len(live) >= caps["max_calls"]:
+            raise LoopGuardTripped(f"{len(live)} live calls in this process (WORLDGYM_MAX_CALLS={caps['max_calls']})")
+        if kind == "model" and name and sum(c.name == name for c in live) >= caps["max_repeat"]:
+            raise LoopGuardTripped(f"request {name!r} repeated {caps['max_repeat']}x (WORLDGYM_MAX_REPEAT)")
+        if kind == "agent" and len(AGENT_LAUNCHES) >= caps["max_agents"]:
+            raise LoopGuardTripped(f"{len(AGENT_LAUNCHES)} agents launched (WORLDGYM_MAX_AGENTS={caps['max_agents']})")
+        if kind == "agent":
+            AGENT_LAUNCHES.append(name or "agent")
 
 
 def record_spend(kind: str, name: str, model: str, usage: dict | None, ok: bool, interaction_id: str | None = None) -> float:
@@ -261,7 +274,7 @@ class Argon:
 
     def _gemini(self, name: str, model: str, system: str, parts: list[dict], thinking: str, json_mode: bool,
                 previous_id: str | None, max_output_tokens: int, background: bool) -> tuple[str, str, dict]:
-        check_budget("model")
+        check_budget("model", name)
         kw = dict(model=model, input=parts, system_instruction=system, background=background,
                   generation_config={"thinking_level": thinking, "max_output_tokens": max_output_tokens})
         if not background:
@@ -294,7 +307,7 @@ class Argon:
         return h.hexdigest()[:32]
 
     def ask_text(self, name: str, system: str, prompt: str, attachments: list[str | Path] = (), model: str = ARGON,
-                 thinking: str = "medium", json_mode: bool = False, previous_id: str | None = None,
+                 thinking: str = "high", json_mode: bool = False, previous_id: str | None = None,
                  max_output_tokens: int = DEFAULT_MAX_OUTPUT, background: bool | None = None) -> tuple[str, dict]:
         attachments = [Path(a) for a in attachments]
         if background is None:  # background serving rejects image/video input; media calls run synchronously
@@ -324,7 +337,8 @@ class Argon:
                     text, iid, usage = self._gemini(name, model, system, self._parts(prompt, attachments), thinking,
                                                     json_mode, previous_id, max_output_tokens, background)
                 except Exception:
-                    CALLS.append(CallLog(name, model, self.backend, time.time() - t0, False))
+                    with _LOCK:
+                        CALLS.append(CallLog(name, model, self.backend, time.time() - t0, False))
                     raise
                 resp = {"text": text, "interaction_id": iid, "model": model, "usage": usage,
                         "seconds": round(time.time() - t0, 1), "thinking_level": thinking}
@@ -340,17 +354,19 @@ class Argon:
         u = resp.get("usage") or {}
         usd = ((u.get("total_input_tokens") or 0) * USD_PER_M_IN
                + ((u.get("total_output_tokens") or 0) + (u.get("total_thought_tokens") or 0)) * USD_PER_M_OUT) / 1e6
-        CALLS.append(CallLog(name, resp.get("model", model), self.backend, time.time() - t0, True, cached,
-                             0.0 if cached else usd))
+        with _LOCK:
+            CALLS.append(CallLog(name, resp.get("model", model), self.backend, time.time() - t0, True, cached,
+                                 0.0 if cached else usd))
         return resp["text"], resp
 
     def ask_json(self, name: str, system: str, prompt: str, schema: type[T], attachments: list[str | Path] = (),
-                 model: str = ARGON, thinking: str = "medium",
-                 max_output_tokens: int = DEFAULT_MAX_OUTPUT) -> tuple[T, dict]:
+                 model: str = ARGON, thinking: str = "high",
+                 max_output_tokens: int = DEFAULT_MAX_OUTPUT, background: bool | None = None,
+                 previous_id: str | None = None) -> tuple[T, dict]:
         rule = ("\n\nReturn exactly ONE JSON object and nothing else (no prose, no code fences). It must validate "
                 f"against this JSON schema:\n{json.dumps(schema.model_json_schema())}")
         text, resp = self.ask_text(name, system, prompt + rule, attachments, model, thinking, json_mode=True,
-                                   max_output_tokens=max_output_tokens)
+                                   previous_id=previous_id, max_output_tokens=max_output_tokens, background=background)
         try:
             return schema.model_validate(parse_json(text)), resp
         except (ValidationError, json.JSONDecodeError, ValueError) as e:
@@ -370,3 +386,16 @@ def call_summary() -> dict:
     return {"calls": len(CALLS), "ok": sum(c.ok for c in CALLS), "cached": sum(c.cached for c in CALLS),
             "seconds": round(sum(c.seconds for c in CALLS), 1), "usd_est": round(sum(c.usd for c in CALLS), 4),
             "by_model": {m: sum(c.model == m for c in CALLS) for m in {c.model for c in CALLS}}}
+
+
+def run_parallel(jobs: list[Callable[[], object]], max_workers: int = 8) -> list[object]:
+    """Run independent model calls concurrently (e.g. one Argon critic per object or per view).
+    Returns results in order; a failed job yields its exception instead of raising."""
+    def wrap(fn):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            return e
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        return list(ex.map(wrap, jobs))

@@ -27,7 +27,7 @@ REPO = Path(__file__).resolve().parents[1]
 AGENT = os.environ.get("WORLDGYM_AGENT", "antigravity-preview-09-2026")
 POLL_S = 10.0
 BUDGET = 24
-AGENT_MAX_TOKENS = int(os.environ.get("WORLDGYM_AGENT_MAX_TOKENS", 400_000))  # per-agent spend cap
+AGENT_MAX_TOKENS = int(os.environ.get("WORLDGYM_AGENT_MAX_TOKENS", 2_000_000))  # runaway guard per agent
 ALLOWLIST = ["github.com", "*.github.com", "*.githubusercontent.com", "pypi.org", "files.pythonhosted.org",
              "astral.sh", "*.astral.sh"]
 
@@ -231,7 +231,7 @@ def launch_agents(task: TaskSpec, task_path: str, policy: PolicyConfig, fam: Fam
     for h in hypotheses:
         prompt = agent_prompt(h, task_path, fam)
         (log_dir / f"agent_{h}_prompt.md").write_text(prompt)
-        check_budget("agent")
+        check_budget("agent", f"swarm_{h}")
         it = client.interactions.create(agent=AGENT, agent_config={"type": "antigravity", "model": ARGON,
                                                                    "max_total_tokens": AGENT_MAX_TOKENS},
                                         input=prompt, environment=env, background=True)

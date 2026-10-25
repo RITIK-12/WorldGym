@@ -33,13 +33,13 @@ cp .env.example .env             # add GEMINI_API_KEY
 | 11 | Live Gemini API + spend guard | done | Argon text + video/image calls verified; ~$0.006 spent on smoke tests |
 | 12 | Video Architect on a real clip | done | 36 s handheld dual-arm wiping clip: 1 call, 142 s, ~$0.11, valid JSON first try |
 
-## API spend guard
+## Runaway-loop guard (not a spend limit)
 
-Live calls go through `core/argon.py`, which serves identical requests from a local cache and enforces hard caps
-before every call (ledger in `.worldgym/api_ledger.jsonl`, gitignored):
-`WORLDGYM_MAX_CALLS` (30 per process), `WORLDGYM_DAILY_CALLS` (150), `WORLDGYM_DAILY_USD` (15),
-`WORLDGYM_DAILY_AGENTS` (8), `WORLDGYM_AGENT_MAX_TOKENS` (400k per Managed Agent). `WORLDGYM_LLM=replay` runs
-the whole pipeline from cached responses with zero API calls.
+Argon runs at `thinking_level="high"` with the full 65,536-token output window. Live calls go through
+`core/argon.py`, which serves identical requests from a local cache and only trips on runaway loops:
+`WORLDGYM_MAX_CALLS` (400 live calls per process), `WORLDGYM_MAX_REPEAT` (same request name 4x),
+`WORLDGYM_MAX_AGENTS` (16 Managed Agents per process), `WORLDGYM_AGENT_MAX_TOKENS` (2M per agent). Token usage
+is logged to `.worldgym/api_ledger.jsonl` (gitignored). `WORLDGYM_LLM=replay` runs from cached responses.
 
 ## How to run
 
@@ -84,10 +84,12 @@ uv run pytest -q
 
 ## Lessons (API quirks found today)
 
-- `gemini-3.8-flash` rejects image input on this account ("Image input modality is not enabled"), so all vision
-  calls use `gemini-4-argon` (low thinking for dense labelling).
-- `background=True` requests are served by an `-agent` variant that rejects image/video parts. Media calls run
-  synchronously with a 20-minute client timeout; text-only calls stay in background mode.
+- `background=True` requests are served by an `-agent` variant that rejects image/video parts for every model
+  ("Image input modality is not enabled for models/<model>-agent"). Media calls run synchronously with a 20-minute
+  client timeout; text-only calls stay in background mode. `scripts/probe_models.py` checks this per model.
+- Synchronously, gemini-4-argon, gemini-3.8-flash, gemini-3.7-flash, gemini-3.5-flash-lite and
+  gemini-robotics-er-2-preview all accept images and agree on a test box within a few units of 1000; Robotics-ER 2
+  answered fastest (1.6 s) and is the dense spatial labeller.
 - Setting `response_mime_type` without a full `response_format` schema is a 400 in synchronous mode. JSON is
   enforced by the prompt contract + pydantic validation + one re-ask instead.
 - Video costs ~1.2k input tokens for a 16 s 640 px clip, an image ~1.1k: a full Video Architect call is cents.
