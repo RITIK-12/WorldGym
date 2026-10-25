@@ -307,6 +307,15 @@ class Argon:
             it = self.client.interactions.get(it.id)
         usage = _usage_dict(it)
         record_spend("model", name, model, usage, it.status == "completed", it.id)
+        if it.status == "incomplete" and not getattr(self, "_retrying", False):
+            # out of output budget: background calls can go past 65,536 tokens; synchronous ones think less instead
+            self._retrying = True
+            try:
+                more = min(max_output_tokens * 2, 262144) if background else max_output_tokens
+                return self._gemini(name, model, system, parts, thinking if background else "medium", json_mode,
+                                    previous_id, more, background)
+            finally:
+                self._retrying = False
         if it.status != "completed":
             raise ArgonError(f"interaction {it.id} ended {it.status}: {getattr(it, 'errors', None)}")
         return it.output_text or "", it.id, usage
