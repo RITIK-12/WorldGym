@@ -21,7 +21,7 @@ cp .env.example .env             # add GEMINI_API_KEY
 |---|---|---|---|
 | 0 | Repo, env, deps, Menagerie | done | mujoco 3.17, google-genai 2.33 |
 | 1 | Sim core: compiler, controller, policy DSL, telemetry, rollout | done | reference pick-place 2/2 in bin, TCP lag p99 1.9 mm, 15.7 s sim in 2.7 s wall |
-| 2 | Locked evaluator | done, locked | 10 referee tests; sha256 `d6e94519…` |
+| 2 | Locked evaluator | v2 locked | 11 referee tests incl. wipe coverage; sha256 `d94d76e9…` (v1 `d6e94519…`) |
 | 3 | Run registry + model adapter (gemini / replay / manual) | done | manifest per run, request bundles |
 | 4 | Video QA gate | done | synthetic tripod clip: static 97 %, accepted; handheld / exposure-drift clips refused |
 | 5 | Robot onboarding + self-test | done | Panda 5/5 checks (IK grid max err 0.09 mm, 0.1 kg box lifted 0.218 m) |
@@ -37,6 +37,8 @@ cp .env.example .env             # add GEMINI_API_KEY
 | 15 | Motion extraction + Replay Critic | done | synthetic: carry waypoints 3.0 mm median from ground truth; Draft 1 replays successfully |
 | 16 | Live Managed Agents | done | smoke test 34 s; live swarm agent: 24 sandbox rollouts in 10 min, 6 failing scenarios with a mechanism |
 | 17 | Studio (Viser) | done | 8-step story mode, live run timeline, 3D replay, live "your turn" runs; Panda meshes welded 397k → 70k vertices |
+| 18 | Bimanual Trossen WidowX AI | done | onboarding agent wrote the adapter in its sandbox; both arms pass the self-test |
+| 19 | Dual-arm hold + wipe primitives | done | synthetic bar wipe: coverage 100 %, sponge returned, 0 unwanted contacts |
 
 ## Agent architecture (video → sim)
 
@@ -134,6 +136,18 @@ uv run pytest -q
   (input, twin build with timings, real↔sim matrices per iteration, replay, benchmark, critique with jump-to-time,
   held-out ratchet, live "your turn" runs with obstacle/object sliders). Draft 3 with the barrier raised to 17 cm and
   the cube moved succeeded live with 0 unwanted contacts.
+- **13:38** Toward the user's real clip (two Trossen WidowX AI arms wiping a steel bar). The Antigravity onboarding
+  agent wrote a single-arm WidowX AI adapter in its sandbox against the self-test (920 s); re-verified locally it only
+  passed with the base raised 0.2 m, so the self-test was made fair instead: grid in each arm's own base frame,
+  robot-relative grid heights, and opt-in servo damping for Menagerie's undamped servos (kv = 0.1 kp). With the base on
+  the table both arms of the bimanual model now pass every check. New primitives: `hold` (grasp and keep holding until
+  the other arms finish), `wipe` (press the held wiper onto a target's top and stroke along its long axis, then put it
+  back) and `sync_after`. Telemetry attributes every robot contact to the arm that made it (arm-arm collisions too) and
+  records wiper-on-target contact points. Evaluator v2 adds `wiped_coverage` (1 cm bins along the target's long axis),
+  with tests, and was re-locked (sha256 `d94d76e9…`). The IK null-space pull to home is now applied only to redundant
+  (> 6 DOF) arms: on 6-DOF arms it made a holding arm drift off its grasp. An arm-clearance sweep showed wiping the
+  bar left of x = 0.05 m makes the two elbows meet, so the synthetic task wipes [0.08, 0.17] m: 100 % coverage, 0
+  unwanted contacts.
 
 ## Lessons (API quirks found today)
 

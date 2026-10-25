@@ -134,3 +134,21 @@ def test_aabb_box_rotation():
     lo, hi = geom_aabb(m, d, g)
     assert hi[0] - lo[0] == pytest.approx(0.04 * math.sqrt(2), abs=1e-6)
     assert np.allclose((lo + hi) / 2, [0.4, 0, 0.1])
+
+
+def test_wiped_coverage():
+    bar = ObjectSpec(id="bar", shape="box", dims_m=[0.40, 0.03, 0.03], xy=[0.45, 0.0], is_fixed=True)
+    sponge = ObjectSpec(id="sponge", shape="box", dims_m=[0.08, 0.05, 0.03], xy=[0.45, -0.2])
+    pred = [Predicate(kind="wiped_coverage", object_id="sponge", target_id="bar", limit=0.6)]
+    task = _task([bar, sponge], pred)
+    _, m = compile_scene(task)
+    d = mujoco.MjData(m)
+    mujoco.mj_forward(m, d)
+    full = [[0.45 + s, 0.0, 0.03] for s in np.linspace(-0.16, 0.16, 200)]
+    half = [[0.45 + s, 0.0, 0.03] for s in np.linspace(-0.16, 0.0, 100)]
+    ok = evaluate(m, d, task, {}, REST, wipe_contacts={"sponge|bar": full})
+    part = evaluate(m, d, task, {}, REST, wipe_contacts={"sponge|bar": half})
+    none = evaluate(m, d, task, {}, REST)
+    assert ok["success"] and ok["predicates"][0]["coverage"] > 0.95
+    assert not part["success"] and 0.4 < part["predicates"][0]["coverage"] < 0.6
+    assert not none["success"] and none["predicates"][0]["coverage"] == 0.0

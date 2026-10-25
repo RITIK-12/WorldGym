@@ -1,6 +1,11 @@
 """Closed parametric primitive DSL and its executor.
 
-Per object: plan -> reach -> descend_grasp -> close -> lift_clear -> transit_arc -> lower_place -> release -> retract.
+pick_place: plan -> reach -> descend_grasp -> close -> lift_clear -> transit_arc -> lower_place -> release -> retract.
+hold:       plan -> reach -> descend_grasp -> close -> hold (until every other arm is done) -> release -> retract.
+wipe:       plan -> reach -> descend_grasp -> close -> lift_clear -> wipe_approach -> wipe_lower -> wipe (strokes along
+            the target's long axis, wiper pressed onto its top) -> wipe_lift -> transit_arc -> lower_place (back where
+            it was picked) -> release -> retract.
+Any primitive may start with `wait` (sync_after: until that arm is holding or idle). Arms run concurrently.
 
 Any numeric field may be a `Rel` ({"terms": [...], "offset": x}) = sum of measured scene features + offset, resolved
 when the action starts. No generated code runs at execution time, so rollouts stay deterministic and model-free.
@@ -74,13 +79,23 @@ class Action:
 class PrimitiveRunner:
     """Executes one Primitive for one arm; owns the per-primitive context shared across its actions."""
 
-    def __init__(self, ix: SceneIndex, d: mujoco.MjData, ctrl: ArmController, prim: Primitive):
-        self.ix, self.d, self.ctrl, self.p = ix, d, ctrl, prim
+    def __init__(self, ix: SceneIndex, d: mujoco.MjData, ctrl: ArmController, prim: Primitive,
+                 executor: "PolicyExecutor | None" = None):
+        self.ix, self.d, self.ctrl, self.p, self.exe = ix, d, ctrl, prim, executor
         self.ctx: dict = {"held_below_tcp": None}
         self.resolved: dict = {}
-        self.actions = [_Plan("plan", self), _Reach("reach", self), _Descend("descend_grasp", self),
-                        _Close("close", self), _Lift("lift_clear", self), _Transit("transit_arc", self),
-                        _Lower("lower_place", self), _Release("release", self), _Retract("retract", self)]
+        acts = [_WaitSync("wait", self)] if prim.sync_after else []
+        acts += [_Plan("plan", self), _Reach("reach", self), _Descend("descend_grasp", self), _Close("close", self)]
+        if prim.kind == "hold":
+            acts += [_HoldUntil("hold", self), _Release("release", self), _Retract("retract", self)]
+        elif prim.kind == "wipe":
+            acts += [_Lift("lift_clear", self), _WipeApproach("wipe_approach", self), _WipeLower("wipe_lower", self),
+                     _Strokes("wipe", self), _WipeLift("wipe_lift", self), _Transit("transit_arc", self),
+                     _Lower("lower_place", self), _Release("release", self), _Retract("retract", self)]
+        else:
+            acts += [_Lift("lift_clear", self), _Transit("transit_arc", self), _Lower("lower_place", self),
+                     _Release("release", self), _Retract("retract", self)]
+        self.actions = acts
 
     def feats(self) -> dict:
         return scene_features(self.ix, self.d, self.p, self.ctx["held_below_tcp"])
@@ -110,6 +125,7 @@ class _Plan(Action):
         off = np.array([c * p.grasp_xy_offset_m[0] - s * p.grasp_xy_offset_m[1],
                         s * p.grasp_xy_offset_m[0] + c * p.grasp_xy_offset_m[1]])
         ctx["grasp_xy"] = ex.obj_pos(p.object_id)[:2] + off
+        ctx["pick_xy"] = ex.obj_pos(p.object_id)[:2].copy()
         yaw = p.grasp_yaw_rad + (oyaw if p.grasp_yaw_mode == "object_relative" else 0.0)
         ctx["grasp_yaw"] = ex.ctrl.choose_yaw(yaw)
         f = ex.feats()
@@ -193,7 +209,10 @@ class _Transit(_Move):
     def start(self):
         ex, p, ctx = self.ex, self.ex.p, self.ex.ctx
         cur, R = ex.ctrl.cmd_pose()
-        if p.target_id:
+        if ctx.get("place_override") is not None:
+            tyaw = 0.0
+            place = np.asarray(ctx["place_override"], float)
+        elif p.target_id:
             tb = ex.ix.obj_body[p.target_id]
             tyaw = body_yaw(ex.d, tb)
             c, s = math.cos(tyaw), math.sin(tyaw)
@@ -227,7 +246,7 @@ class _Lower(_Move):
         ex, ctx = self.ex, self.ex.ctx
         f = ex.feats()
         drop = ex.r("release_drop_height_m")
-        z = f["target_floor_z"] + drop + f["held_below_tcp"]
+        z = ctx.get("place_floor_z", f["target_floor_z"]) + drop + f["held_below_tcp"]
         z = min(z, ctx["hover_z"])
         ex.resolved["release_z"] = round(z, 4)
         px, py = ctx["place_xy"]
@@ -248,6 +267,106 @@ class _Retract(_Move):
         ex.ctrl.move([[cur[0], cur[1], max(ex.r("retract_z_m"), cur[2])]], ex.ctrl.tcp_yaw(R), ex.p.speed_mps)
 
 
+class _WaitSync(Action):
+    def step(self):
+        ex = self.ex
+        ex.ctrl.ik_step(*ex.ctrl.cmd_pose())
+        return ex.exe is None or ex.exe.phase(ex.p.sync_after)[0] in ("hold", "idle")
+
+
+class _HoldUntil(_Move):
+    """Keep the grasp (optionally lifted by hold_lift_m) until every other arm has finished."""
+
+    def start(self):
+        ex = self.ex
+        if ex.p.hold_lift_m > 0:
+            cur, R = ex.ctrl.cmd_pose()
+            ex.ctrl.move([[cur[0], cur[1], cur[2] + ex.p.hold_lift_m]], ex.ctrl.tcp_yaw(R), ex.p.speed_mps * 0.5)
+
+    def step(self):
+        ex = self.ex
+        if ex.ctrl.path is not None:
+            ex.ctrl.step_motion()
+            return False
+        ex.ctrl.ik_step(*ex.ctrl.cmd_pose())
+        exe = ex.exe
+        return exe is None or all(exe.phase(a)[0] == "idle" for a in exe.ctrls if a != ex.p.arm)
+
+
+def wipe_geometry(ex: "PrimitiveRunner") -> dict:
+    """Stroke endpoints along the target's long horizontal axis, the surface top and the TCP height while pressing."""
+    p = ex.p
+    t = ex.ix.task.obj(p.target_id)
+    b = ex.ix.obj_body[p.target_id]
+    R = ex.d.xmat[b].reshape(3, 3)
+    centre = ex.d.xpos[b][:2].copy()
+    ax = R[:2, 0] if t.dims_m[0] >= t.dims_m[1] else R[:2, 1]
+    ax = ax / (np.linalg.norm(ax) + 1e-9)
+    perp = np.array([-ax[1], ax[0]])
+    f = ex.feats()
+    surf = ex.r("wipe_surface_z_m")
+    surf = f["target_rim_z"] if surf is None else surf
+    z = surf - ex.r("wipe_press_m") + f["held_below_tcp"]
+    start = centre + ax * p.wipe_start_m + perp * p.wipe_lateral_m
+    end = centre + ax * p.wipe_end_m + perp * p.wipe_lateral_m
+    ex.resolved.update(wipe_start_xy=[round(float(v), 4) for v in start], wipe_end_xy=[round(float(v), 4) for v in end],
+                       wipe_surface_z=round(surf, 4), wipe_tcp_z=round(z, 4))
+    return {"start": start, "end": end, "z": z, "surf": surf, "hover": surf + f["held_below_tcp"] + 0.04}
+
+
+class _WipeApproach(_Move):
+    def start(self):
+        ex = self.ex
+        g = ex.ctx["wipe"] = wipe_geometry(ex)
+        cur, R = ex.ctrl.cmd_pose()
+        hz = max(g["hover"], cur[2])
+        ex.ctrl.move([[cur[0], cur[1], hz], [g["start"][0], g["start"][1], hz],
+                      [g["start"][0], g["start"][1], g["hover"]]], ex.ctrl.tcp_yaw(R), ex.p.speed_mps)
+
+
+class _WipeLower(_Move):
+    def start(self):
+        ex = self.ex
+        g = ex.ctx["wipe"]
+        _, R = ex.ctrl.cmd_pose()
+        ex.ctrl.move([[g["start"][0], g["start"][1], g["z"]]], ex.ctrl.tcp_yaw(R), ex.p.speed_mps * 0.3)
+
+
+class _Strokes(_Move):
+    """wipe_strokes passes between the endpoints, each with its own min-jerk profile, keeping the press height."""
+
+    def start(self):
+        self.k = 0
+        self._next()
+
+    def _next(self):
+        ex = self.ex
+        g = ex.ctx["wipe"]
+        pt = g["end"] if self.k % 2 == 0 else g["start"]
+        _, R = ex.ctrl.cmd_pose()
+        ex.ctrl.move([[pt[0], pt[1], g["z"]]], ex.ctrl.tcp_yaw(R), ex.p.wipe_speed_mps)
+
+    def step(self):
+        done, _ = self.ex.ctrl.step_motion()
+        if not done:
+            return False
+        self.k += 1
+        if self.k >= max(1, self.ex.p.wipe_strokes):
+            return True
+        self._next()
+        return False
+
+
+class _WipeLift(_Move):
+    def start(self):
+        ex, p, ctx = self.ex, self.ex.p, self.ex.ctx
+        g = ctx["wipe"]
+        cur, R = ex.ctrl.cmd_pose()
+        ex.ctrl.move([[cur[0], cur[1], g["hover"] + 0.02]], ex.ctrl.tcp_yaw(R), p.speed_mps * 0.5)
+        ctx["place_override"] = ctx["pick_xy"] if p.place_back else _xy(p.place_xy_offset_m)
+        ctx["place_floor_z"] = 0.0
+
+
 class PolicyExecutor:
     """Action queue per arm. Actions start lazily (parameters resolve from the current state); zero-duration actions
     and the start of the next action chain within the same tick so no idle tick separates phases."""
@@ -257,7 +376,7 @@ class PolicyExecutor:
         self.queues: dict[str, list[tuple[PrimitiveRunner, Action]]] = {a: [] for a in ctrls}
         self.runners: list[PrimitiveRunner] = []
         for prim in policy.primitives:
-            run = PrimitiveRunner(ix, d, ctrls[prim.arm], prim)
+            run = PrimitiveRunner(ix, d, ctrls[prim.arm], prim, self)
             self.runners.append(run)
             self.queues[prim.arm] += [(run, a) for a in run.actions]
         self.current: dict[str, tuple[PrimitiveRunner, Action] | None] = {a: None for a in ctrls}

@@ -163,7 +163,7 @@ def run_episode(task: TaskSpec, policy: PolicyConfig, adapter: RobotAdapter | No
     trace = tel.finish()
     trace["timed_out"] = not ex.done
     evaluation = evaluate(m, d, task, init_pos, list(zip(tel.t, tel.max_obj_speed)),
-                          trace["metrics"]["unwanted_collision_count"])
+                          trace["metrics"]["unwanted_collision_count"], wipe_contacts=tel.wipe_contacts())
     resolved = [{"object_id": r.p.object_id, "arm": r.p.arm, **r.resolved} for r in ex.runners]
     ep = Episode(success=evaluation["success"] and not trace["timed_out"], evaluation=evaluation, trace=trace,
                  resolved=resolved, wall_s=time.time() - wall0, sim_s=float(d.time),

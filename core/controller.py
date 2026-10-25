@@ -147,8 +147,9 @@ class ArmController:
         J = np.vstack([self.jacp[:, self.dadr], self.jacr[:, self.dadr]])
         JJt = J @ J.T + 0.03 ** 2 * np.eye(6)
         dq = J.T @ np.linalg.solve(JJt, e)
-        N = np.eye(self.n) - J.T @ np.linalg.solve(JJt, J)
-        dq += N @ (0.02 * (self.q_home - self.q_cmd))
+        if self.n > 6:  # null-space pull to home only exists for redundant arms; on 6-DOF arms it causes drift
+            N = np.eye(self.n) - J.T @ np.linalg.solve(JJt, J)
+            dq += N @ (0.02 * (self.q_home - self.q_cmd))
         dq = np.clip(dq, -self.vel * self.dt, self.vel * self.dt)
         self.q_cmd = np.clip(self.q_cmd + dq, self.lo + 0.02, self.hi - 0.02)
         return float(np.linalg.norm(e[:3]))

@@ -1,7 +1,8 @@
 """Locked, read-only referee for success predicates.
 
 Self-contained on purpose: it only reads MjModel/MjData + the TaskSpec and never imports policy or telemetry code.
-After its tests pass it is chmod 444 and must not be edited (its sha256 is shown in the Studio).
+After its tests pass it is chmod 444 and must not be edited (its sha256 is shown in the Studio). Version 2 adds
+`wiped_coverage` for wiping tasks (re-locked before any wiping benchmark existed).
 
 Exact AABBs: a cylinder's world extent along axis i is r*sqrt(1 - a_i^2) + (h/2)*|a_i| where a is its axis
 (the third column of xmat). Treating a cylinder as an (r, r, h/2) box inflates a yawed cylinder by sqrt(2).
@@ -103,12 +104,37 @@ def on_top_of(m, d, task, object_id: str, target_id: str, max_tilt_deg: float) -
     return {"ok": ok, "over_footprint": over, "gap_m": gap, "tilt_deg": round(tilt, 2)}
 
 
+def wiped_coverage(m, d, task, object_id: str, target_id: str, limit: float | None, region,
+                   points: list | None) -> dict:
+    """Fraction of 1 cm bins along the target's long horizontal axis touched by the wiper (contact points recorded
+    while wiping). Span = `region` [s_min, s_max] in metres from the target centre, else its central 80 %."""
+    t = _obj(task, target_id)
+    tb = _body(m, target_id)
+    R = d.xmat[tb].reshape(3, 3)
+    ax = R[:, 0] if t.dims_m[0] >= t.dims_m[1] else R[:, 1]
+    L = max(t.dims_m[0], t.dims_m[1])
+    s0, s1 = (region[0], region[1]) if region else (-0.4 * L, 0.4 * L)
+    n = max(1, int(round((s1 - s0) / 0.01)))
+    hit = np.zeros(n, bool)
+    pts = np.asarray(points or [], float).reshape(-1, 3)
+    if len(pts):
+        s = (pts - d.xpos[tb]) @ ax
+        k = np.floor((s - s0) / (s1 - s0) * n).astype(int)
+        hit[k[(k >= 0) & (k < n)]] = True
+    cov = float(hit.mean())
+    need = 0.5 if limit is None else limit
+    return {"ok": cov >= need, "coverage": round(cov, 3), "required": need, "span_m": [round(s0, 3), round(s1, 3)],
+            "n_points": int(len(pts))}
+
+
 def evaluate(m: mujoco.MjModel, d: mujoco.MjData, task, initial_pos: dict[str, list[float]],
-             max_speed_hist: list[tuple[float, float]], unwanted_collisions: int = 0) -> dict:
+             max_speed_hist: list[tuple[float, float]], unwanted_collisions: int = 0,
+             wipe_contacts: dict[str, list] | None = None) -> dict:
     """Score every immutable predicate.
 
     initial_pos: object id -> body position at t = 0 (after settle).
     max_speed_hist: (t, max linear speed over all free objects) samples covering at least the last 0.5 s.
+    wipe_contacts: "wiper|target" -> contact points recorded while wiping.
     """
     results = []
     for p in task.immutable_success_predicates:
@@ -130,6 +156,9 @@ def evaluate(m: mujoco.MjModel, d: mujoco.MjData, task, initial_pos: dict[str, l
                 r = {"ok": vmax <= REST_SPEED, "max_speed": vmax}
         elif p.kind == "max_unwanted_collisions":
             r = {"ok": unwanted_collisions <= (p.limit or 0), "count": unwanted_collisions}
+        elif p.kind == "wiped_coverage":
+            r = wiped_coverage(m, d, task, p.object_id, p.target_id, p.limit, p.region,
+                               (wipe_contacts or {}).get(f"{p.object_id}|{p.target_id}"))
         elif p.kind == "pushed_to_region":
             x, y = d.xpos[_body(m, p.object_id)][:2]
             x0, y0, x1, y1 = p.region

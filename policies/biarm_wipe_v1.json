@@ -1,0 +1,40 @@
+{
+ "name": "biarm_wipe_v1",
+ "primitives": [
+  {
+   "kind": "hold",
+   "arm": "left",
+   "object_id": "grab_bar",
+   "grasp_xy_offset_m": [
+    -0.16,
+    0.0
+   ],
+   "grasp_z_depth_m": 0.01,
+   "grasp_yaw_mode": "object_relative",
+   "grasp_yaw_rad": 1.5708,
+   "pre_grasp_open_width_m": 0.06,
+   "grip_force_n": 20
+  },
+  {
+   "kind": "wipe",
+   "arm": "right",
+   "object_id": "sponge",
+   "target_id": "grab_bar",
+   "sync_after": "left",
+   "grasp_yaw_mode": "object_relative",
+   "grasp_yaw_rad": 1.5708,
+   "pre_grasp_open_width_m": 0.08,
+   "grip_force_n": 12,
+   "post_grasp_lift_z_m": 0.18,
+   "wipe_start_m": 0.08,
+   "wipe_end_m": 0.17,
+   "wipe_strokes": 4,
+   "wipe_press_m": 0.006,
+   "pre_place_hover_z_m": 0.12,
+   "transit_apex_z_m": 0.18,
+   "release_drop_height_m": 0.005,
+   "retract_z_m": 0.2,
+   "release_open_width_m": 0.085
+  }
+ ]
+}
