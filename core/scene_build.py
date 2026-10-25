@@ -98,8 +98,34 @@ robot, +y to the robot's left, yaw radians about +z, dims_m FULL extents [x, y, 
 [diameter, diameter, height]). Colours are RGBA in 0..1."""
 
 
+ASSET_RULES = """
+You can call the tool search_simready_assets(query) to find a real, physically-ready 3D asset (NVIDIA SimReady,
+CC-BY 4.0) for an object; it returns candidates with their metric size and a thumbnail. When a candidate clearly
+matches the object's kind and shape, use shape "mesh" with "asset": {"name": <asset name>, "url": <name>} and dims_m =
+the object's real size (the asset is rescaled to it). Keep primitives/composites for objects with no good match,
+for containers and for fixtures you can describe exactly."""
+
+
+def _finish_assets(draft: SceneDraft) -> SceneDraft:
+    """Download + convert chosen assets; an object whose asset cannot be prepared becomes a box of the same size."""
+    from core.assets import ensure_asset
+
+    objs = []
+    for o in draft.objects:
+        if o.shape == "mesh":
+            try:
+                info = ensure_asset(o.asset.name)
+                o = o.model_copy(update={"asset": o.asset.model_copy(update={
+                    "native_dims_m": info["native_dims_m"], "mass_kg": info["mass_kg"],
+                    "attribution": info["attribution"], "license": info["license"]})})
+            except Exception:  # noqa: BLE001
+                o = o.model_copy(update={"shape": "box", "asset": None})
+        objs.append(o)
+    return draft.model_copy(update={"objects": objs})
+
+
 def author_scene(argon: Argon, vu: VideoUnderstanding, measured: dict, rest_frame: Path, overlay: Path,
-                 prompt: str) -> SceneDraft:
+                 prompt: str, use_assets: bool = True) -> SceneDraft:
     text = f"""User prompt: "{prompt}"
 Video understanding:
 {vu.model_dump_json(indent=1, exclude={'keyframes'})}
@@ -109,8 +135,16 @@ Measured footprints on the table (metres; xy = footprint centre, rect_yaw/rect_e
 
 Attachments: rest_frame.jpg (clean) and masks.jpg (the real object masks the measurements came from, labelled).
 Write the scene. Use exactly the object ids above."""
-    draft, _ = argon.ask_json("scene_author", AUTHOR_SYSTEM, text, SceneDraft, [rest_frame, overlay], model=ARGON,
-                              thinking="high")
+    if use_assets:
+        from core.argon import ask_with_tools
+        from core.assets import TOOL, run_tool
+
+        draft, _ = ask_with_tools(argon, "scene_author", AUTHOR_SYSTEM + ASSET_RULES, text, SceneDraft,
+                                  {TOOL["name"]: (TOOL, run_tool)}, [rest_frame, overlay])
+        draft = _finish_assets(draft)
+    else:
+        draft, _ = argon.ask_json("scene_author", AUTHOR_SYSTEM, text, SceneDraft, [rest_frame, overlay],
+                                  model=ARGON, thinking="high")
     ids = {o.id for o in draft.objects}
     draft.immutable_success_predicates = [p for p in draft.immutable_success_predicates
                                           if (p.object_id is None or p.object_id in ids)

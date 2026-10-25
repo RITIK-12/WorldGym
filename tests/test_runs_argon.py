@@ -150,3 +150,33 @@ def test_retry_on_malformed_json_400(tmp_path, monkeypatch):
     obj, _ = ar.ask_json("t", "s", "p", Thing, previous_id="prev")
     assert obj.a == 1 and len(calls) == 2
     assert "previous attempt failed" in calls[1]["input"][-1]["text"]
+
+
+def test_tool_loop_executes_calls(tmp_path, monkeypatch):
+    import core.argon as a
+    monkeypatch.setattr(a, "STATE", tmp_path / "state")
+    seen = []
+
+    class Call:
+        type, id, name, arguments = "function_call", "c1", "lookup", {"q": "sponge"}
+
+    class First:
+        status, id, steps, output_text, usage = "requires_action", "i1", [Call()], "", None
+
+    class Final:
+        status, id, steps, output_text, usage = "completed", "i2", [], '{"a": 7, "b": "done"}', None
+
+    class FakeInteractions:
+        def create(self, **kw):
+            seen.append(kw)
+            return First() if len(seen) == 1 else Final()
+
+    class FakeClient:
+        interactions = FakeInteractions()
+
+    ar = Argon(tmp_path / "b", backend="gemini")
+    ar._client = FakeClient()
+    tools = {"lookup": ({"type": "function", "name": "lookup"}, lambda args: f"found {args['q']}")}
+    obj, resp = a.ask_with_tools(ar, "t", "s", "p", Thing, tools)
+    assert obj.a == 7 and resp["tool_calls"][0]["result"] == "found sponge"
+    assert seen[1]["input"][0]["type"] == "function_result" and seen[1]["previous_interaction_id"] == "i1"

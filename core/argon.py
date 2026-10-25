@@ -421,3 +421,64 @@ def run_parallel(jobs: list[Callable[[], object]], max_workers: int = 8) -> list
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         return list(ex.map(wrap, jobs))
+
+
+def ask_with_tools(argon: Argon, name: str, system: str, prompt: str, schema: type[T], tools: dict,
+                   attachments: list[str | Path] = (), model: str = ARGON, thinking: str = "high",
+                   max_rounds: int = 6, max_output_tokens: int = DEFAULT_MAX_OUTPUT) -> tuple[T, dict]:
+    """Function-calling loop on the Interactions API: tools = {name: (declaration, fn(args) -> result)}.
+    The model calls tools (status requires_action), we answer with function_result steps on the same interaction
+    chain, until it returns the final JSON. Offline backends fall back to ask_json without tools."""
+    if argon.backend != "gemini":
+        return argon.ask_json(name, system, prompt, schema, attachments, model, thinking, max_output_tokens)
+    attachments = [Path(a) for a in attachments]
+    rule = ("\n\nWhen you are done using tools, return exactly ONE JSON object and nothing else. It must validate "
+            f"against this JSON schema:\n{json.dumps(schema.model_json_schema())}")
+    b = argon._bundle(name, system, prompt + rule, attachments)
+    key = argon._cache_key(model, system, prompt + rule + json.dumps(sorted(tools)), attachments, thinking, True,
+                           None, max_output_tokens)
+    cpath = STATE / "cache" / f"{key}.json"
+    if argon.use_cache and cpath.exists():
+        resp = json.loads(cpath.read_text())
+    else:
+        decls = [d for d, _ in tools.values()]
+        gen = {"thinking_level": thinking, "max_output_tokens": max_output_tokens}
+        check_budget("model", name)
+        t0 = time.time()
+        it = argon._create(name, model, dict(model=model, input=argon._parts(prompt + rule, attachments),
+                                              system_instruction=system, tools=decls, generation_config=gen,
+                                              timeout=TIMEOUT_S))
+        record_spend("model", name, model, _usage_dict(it), True, it.id)
+        log = []
+        for _ in range(max_rounds):
+            calls = [s for s in (it.steps or []) if getattr(s, "type", None) == "function_call"]
+            if it.status != "requires_action" or not calls:
+                break
+            results = []
+            for c in calls:
+                try:
+                    out, err = tools[c.name][1](dict(c.arguments or {})), False
+                except Exception as e:  # noqa: BLE001 - the model sees the error and can adapt
+                    out, err = f"error: {e}", True
+                log.append({"tool": c.name, "args": dict(c.arguments or {}),
+                            "result": out if isinstance(out, str) else [p for p in out if p.get("type") == "text"]})
+                results.append({"type": "function_result", "call_id": c.id, "name": c.name, "result": out,
+                                "is_error": err})
+            check_budget("model", f"{name}__tools")
+            it = argon._create(name, model, dict(model=model, input=results, previous_interaction_id=it.id,
+                                                  system_instruction=system, tools=decls, generation_config=gen,
+                                                  timeout=TIMEOUT_S))
+            record_spend("model", f"{name}__tools", model, _usage_dict(it), True, it.id)
+        resp = {"text": it.output_text or "", "interaction_id": it.id, "model": model, "tool_calls": log,
+                "seconds": round(time.time() - t0, 1)}
+        cpath.parent.mkdir(parents=True, exist_ok=True)
+        cpath.write_text(json.dumps(resp, indent=1))
+        with _LOCK:
+            CALLS.append(CallLog(name, model, argon.backend, time.time() - t0, True))
+    (b / "response.json").write_text(json.dumps(resp, indent=1))
+    try:
+        return schema.model_validate(parse_json(resp["text"])), resp
+    except (ValidationError, json.JSONDecodeError, ValueError) as e:
+        fix = f"Your answer failed validation:\n{str(e)[:3000]}\n\nReturn the corrected single JSON object only."
+        return argon.ask_json(f"{name}__fix", system, fix, schema, (), model, thinking, max_output_tokens,
+                              previous_id=resp.get("interaction_id"))
