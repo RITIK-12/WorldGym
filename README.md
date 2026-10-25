@@ -21,31 +21,7 @@ many passes, and what happens to the object afterwards.
 
 ## Agent architecture
 
-```text
-+--------------------------- WorldGym UI (Viser, localhost:8080) -----------------------------+
-|  Upload video -> Convert to sim -> checklist + progress -> 3D world -> Run simulation       |
-+----------------------------------------------+----------------------------------------------+
-                                               | clip
-+---------------------------------- Orchestrator (Python) ------------------------------------+
-|                                                                                             |
-|  Video Architect            Labelling swarm              Four-view Critic                   |
-|  Gemini 4 Argon, 1 call     16 x Gemini Robotics-ER 2    Gemini 4 Argon, up to 2 rounds     |
-|  sees: clip, keyframes,     sees: 8 frames each          sees: original clip + 4-view       |
-|    rendered robot models    returns: gripper point,        video of the simulation run      |
-|  tool: SimReady search        open/held, object boxes    returns: scene edits +             |
-|  returns: robot, objects,                                  policy patch                     |
-|    layout, assets, phases,                                                                  |
-|    motion of each arm                                                                       |
-|        |                            |                              ^          |             |
-|        v                            v                              |          v             |
-|  +--------------------------------------------------------------------------------------+   |
-|  |  Tools: camera solver, motion extraction, SimReady converter, MuJoCo + Menagerie     |   |
-|  +--------------------------------------------------------------------------------------+   |
-|        |                                                                                    |
-|        v                                                                                    |
-|  Locked evaluator (no model): scores every run. A patch is kept only if the score improves. |
-+---------------------------------------------------------------------------------------------+
-```
+![WorldGym agent architecture](media/architecture.svg)
 
 | Agent | Model | Input | Output | Judged by |
 |---|---|---|---|---|
@@ -59,43 +35,7 @@ not code, so agents can only change parameters and every proposal can be run and
 
 ## Pipeline
 
-```text
-input video
-    |
-    v
-Clip QA (OpenCV) -------------------------- fixed or handheld camera mode
-    |
-    v
-Video Architect (1 Argon call) ----------------------> Labelling swarm (16 x Robotics-ER, in parallel)
-    |                                                          |
-    v                                                          |
-Robot onboarding: Menagerie model, two arms if needed,         |
-6-check self-test                                              |
-    |                                                          |
-    v                                                          |
-GEN 1  First world: scene and motion from the architect        |
-       alone. Shown and runnable.                              |
-    |                                                          |
-    v                                                          |
-Camera solve: match the rendered robot outline to the video,   |
-track the table plane for handheld clips                       |
-    |                                                          |
-    v                                                          v
-GEN 2  Measured world: objects moved to measured positions, motion re-extracted from the
-       labels. The architect's structure (direction, passes, put back) is kept.
-    |
-    v
-Four-view video of the Gen 2 run: overlay, top, side, wireframe
-    |
-    v
-Four-view Critic (Argon): original + four views -> scene edits + policy patch
-    |
-    v
-Locked evaluator: is it better? (success, then contacts, then end-pose error)
-    |  yes                                   |  no
-    v                                        v
-GEN 3  Refined world                    second round, which sees why the first one failed
-```
+![WorldGym pipeline](media/pipeline.svg)
 
 Every generation is a complete world. The 3D view always shows the newest one, and Run simulation plays it live
 in MuJoCo in real time.
