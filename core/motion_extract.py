@@ -250,7 +250,9 @@ def extract_multi(task: TaskSpec, labels: list[Keyframe], sim, w: int, h: int, c
                         if p is not None:
                             ss.append(float((p[:2] - c) @ ax))
                             ts.append(t)
-                ss = np.clip(np.array(ss), -0.45 * L, 0.45 * L) if ss else np.array([-0.1 * L, 0.1 * L])
+                if len(ss) < 3:  # a grasp flicker outside the wipe phase, not a wipe
+                    continue
+                ss = np.clip(np.array(ss), -0.45 * L, 0.45 * L)
                 strokes = max(1, _reversals(ss) + 1)
                 pick = d.xpos[ix.obj_body[obj.id]][:2].copy()
                 _set_cam(sim, cam_at, t_rel)
