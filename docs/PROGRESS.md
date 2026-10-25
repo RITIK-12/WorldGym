@@ -204,5 +204,10 @@ uv run pytest -q
 - Video costs ~1.2k input tokens for a 16 s 640 px clip, an image ~1.1k: a full Video Architect call is cents.
 - A long hardening prompt at `thinking_level="high"` can end `incomplete` (thinking + answer share the output
   window); text-only calls can be retried in background mode with a larger `max_output_tokens`.
+- Chaining synchronous calls that carry images/video with `previous_interaction_id` stalled (14+ min) or failed
+  (malformed JSON) on the second round; the critics now carry their own memory (earlier critiques, edits, outcomes)
+  in the prompt instead.
+- A visual robot check needs a frame showing the whole robot: a wrist close-up alone picked an all-black Trossen
+  model; with the rest-pose frame (white link shells visible) Argon picked the i2rt YAM.
 - Function calling: the interaction stops with `requires_action` and `function_call` steps; answering with
   `function_result` steps and `previous_interaction_id` continues the same chain. Results may include images.
