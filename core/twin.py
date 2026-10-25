@@ -29,7 +29,7 @@ from core.mjcf_compiler import ROBOTS, scene_table
 from core.motion_extract import extract, extract_multi
 from core.first_world import arm_bases, policy_from_phases, refine_positions, robot_frame, scene_from_vu
 from core.replay_critic import run_final_critic
-from core.robot_onboard import onboard, self_test, verify_robot
+from core.robot_onboard import onboard, self_test
 from core.rollout import build_sim, run_episode
 from core.runs import Refused, Run
 from core.scene_build import make_task, mask_overlay, measure_objects
@@ -126,7 +126,7 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
             raise Refused("; ".join(pr["reasons"]))
 
     with run.stage("video_architect") as s:
-        vu = understand(video, pr, prompt, argon, run.path("architect"))
+        vu = understand(video, pr, prompt, argon, run.path("architect"))   # one call (+ SimReady tool turns)
         run.write_json("architect/vu.json", vu.model_dump())
         s.headline = f"{vu.robot.make_model_guess} · {len(vu.objects)} objects · {len(vu.phases)} phases"
         s.data = {"robot": vu.robot.model_dump(), "objects": [o.model_dump() for o in vu.objects],
@@ -146,16 +146,9 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
         t_full = min((k.t for k in vu.keyframes), default=0.0)   # robot at rest, most of it in view
         fpath = run.path("onboard/real_frame.jpg")
         cv2.imwrite(str(fpath), _frame(video, t_full))
-        fmid = run.path("onboard/real_frame_mid.jpg")
-        cv2.imwrite(str(fmid), _frame(video, (t_act0 + t_act1) / 2))
-        guess = vu.robot.menagerie_dir or "franka_emika_panda"
-        try:
-            pick = verify_robot(argon, [fpath, fmid], guess, run.path("onboard"))
-            mdir = pick.menagerie_dir
-            s.data["verify"] = pick.model_dump()
-        except Exception as e:  # noqa: BLE001 - keep the first-pass guess if the check fails
-            mdir = guess
-            s.data["verify_error"] = str(e)[:300]
+        # the architect already picked the model by comparing the clip with rendered candidates (same call)
+        mdir = vu.robot.menagerie_dir or "franka_emika_panda"
+        s.data["verify"] = {"menagerie_dir": mdir, "confidence": vu.robot.confidence, "by": "video_architect"}
         adapter = find_adapter(mdir, n_arms)
         source = f"robots/{adapter.robot_id}.json" if adapter else None
         if adapter is None and n_arms == 1:
@@ -165,11 +158,10 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
             raise Refused(f"no {n_arms}-arm adapter for {mdir}")
         st = self_test(adapter)
         n_ok = sum(c["ok"] for c in st["checks"].values())
-        changed = mdir != guess
-        s.headline = (f"{adapter.robot_id}" + (f" (Argon corrected {guess} → {mdir} by comparing renders)" if changed
-                                              else "") + f" · self-test {n_ok}/{len(st['checks'])}")
+        s.headline = (f"{adapter.robot_id} (picked by Argon against rendered candidates) · "
+                      f"self-test {n_ok}/{len(st['checks'])}")
         s.data.update(self_test=st, source=source, adapter=adapter.robot_id)
-        s.artifacts += ["onboard/real_frame.jpg", "onboard/candidates.jpg"]
+        s.artifacts += ["onboard/real_frame.jpg"]
         if not st["ok"]:
             raise RuntimeError(f"robot self-test failed: { {k: v['ok'] for k, v in st['checks'].items()} }")
 

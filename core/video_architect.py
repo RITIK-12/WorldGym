@@ -18,7 +18,7 @@ import imageio_ffmpeg
 import numpy as np
 from pydantic import BaseModel
 
-from core.argon import ARGON, ROBOTICS_ER, Argon, run_parallel
+from core.argon import ARGON, ROBOTICS_ER, STATE as STATE_DIR, Argon, run_parallel
 from core.mjcf_compiler import MENAGERIE
 from core.schemas import Keyframe, VideoUnderstanding
 
@@ -73,7 +73,7 @@ def _kf_list(paths: list[Path], times: list[float]) -> str:
 
 
 def understand(video: str | Path, probe: dict, prompt: str, argon: Argon, out_dir: str | Path,
-               n_extra: int = 6, review: bool = True) -> VideoUnderstanding:
+               n_extra: int = 6, review: bool = False) -> VideoUnderstanding:
     from core.video_probe import extract_frames
 
     out_dir = Path(out_dir)
@@ -85,11 +85,18 @@ def understand(video: str | Path, probe: dict, prompt: str, argon: Argon, out_di
     frames = extract_frames(video, times, out_dir / "keyframes", prefix="kf")
     small = downscale(video, out_dir / "clip_small.mp4", max_s=max(dur + 1.0, 30.0))  # same time base as keyframes
     models = menagerie_models()
+    from core.robot_onboard import ARM_CANDIDATES, render_candidates
+
+    sheet = STATE_DIR / "robot_candidates.jpg"     # deterministic renders, shared by every run
+    if not sheet.exists():
+        sheet.parent.mkdir(parents=True, exist_ok=True)
+        render_candidates(ARM_CANDIDATES, sheet)
     text = f"""TASK PROMPT FROM THE USER: "{prompt}"
 
 The video is attached (clip_small.mp4, {dur:.1f} s, original {probe.get('width')}x{probe.get('height')}).{_trim_note(probe)}
 Keyframes are attached as JPEGs with these timestamps:
 {_kf_list(frames, times)}
+robot_candidates.jpg (the last attachment) shows rendered robot models for the robot identification.
 
 Robot models available (MuJoCo Menagerie directories): {', '.join(models)}
 Object shape vocabulary: {SHAPES}.
@@ -97,7 +104,10 @@ Object shape vocabulary: {SHAPES}.
 {CONVENTIONS}
 
 Produce:
-- robot: make_model_guess, arms (1 or 2), gripper type, menagerie_dir (closest match from the list), confidence 0..1.
+- robot: make_model_guess, arms (1 or 2), gripper type, confidence 0..1, and menagerie_dir chosen by comparing
+  the real arm with robot_candidates.jpg (rendered MuJoCo models, each labelled with its directory, two views).
+  Judge the whole arm: link shapes and colours (white/grey shells vs all-black links), proportions, joint layout,
+  gripper design; wrist close-ups alone are ambiguous. menagerie_dir must be one of: {', '.join(ARM_CANDIDATES)}.
 - objects: every object the robot manipulates plus containers, fixtures and obstacles on the table (not the table
   itself). Miss nothing the robot touches. id = short snake_case with colour (e.g. red_cube, white_sponge,
   silver_bar). type from the vocabulary. colour = a plain colour word. size_guess_m = FULL extents [x, y, z] in the
@@ -122,9 +132,9 @@ Produce:
         from core.assets import TOOL, run_tool
 
         vu, resp = ask_with_tools(argon, "video_architect", SYSTEM, text, VideoUnderstanding,
-                                  {TOOL["name"]: (TOOL, run_tool)}, [small, *frames], max_rounds=4)
+                                  {TOOL["name"]: (TOOL, run_tool)}, [small, *frames, sheet], max_rounds=4)
     except Exception:  # noqa: BLE001 - the twin needs the understanding more than the asset choice
-        vu, resp = argon.ask_json("video_architect", SYSTEM, text, VideoUnderstanding, [small, *frames],
+        vu, resp = argon.ask_json("video_architect", SYSTEM, text, VideoUnderstanding, [small, *frames, sheet],
                                   model=ARGON, thinking="high")
     snap = {round(t, 2) for t in times}
     for kf in vu.keyframes:

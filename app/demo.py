@@ -28,7 +28,8 @@ import viser
 
 import core.runs as runs
 from app.scene import SceneMirror
-from core.mjcf_compiler import FLOOR_Z
+from core.first_world import robot_frame
+from core.mjcf_compiler import FLOOR_Z, load_adapter
 from core.rollout import build_sim, run_episode
 from core.schemas import PolicyConfig, TaskSpec
 
@@ -67,8 +68,13 @@ def preview_html(video: Path) -> str:
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-vf", "scale=480:-2", "-c:v", "libx264",
                         "-preset", "veryfast", "-crf", "30", "-an", "-movflags", "+faststart", str(out)], check=True)
     b64 = base64.b64encode(out.read_bytes()).decode()
-    return (f'<video autoplay muted loop playsinline style="width:100%;border-radius:10px;display:block;'
-            f'background:#000" src="data:video/mp4;base64,{b64}"></video>'
+    wh = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                         "-of", "csv=p=0", str(out)], capture_output=True, text=True).stdout.strip().strip(",").split(",")
+    ar = f"{wh[0]} / {wh[1]}" if len(wh) == 2 else "16 / 9"
+    # the whole frame at its own aspect ratio: never cropped or zoomed
+    return (f'<video autoplay muted loop playsinline controls style="width:100%;height:auto;aspect-ratio:{ar};'
+            f'object-fit:contain;border-radius:10px;display:block;background:#000" '
+            f'src="data:video/mp4;base64,{b64}"></video>'
             f'<div style="font-size:12px;color:{INK2};padding:4px 2px 0">{html.escape(video.name)}</div>')
 
 
@@ -313,7 +319,7 @@ class Demo:
             self.mirror.load(sim.m)
             self.mirror.update(sim.d.xpos, sim.d.xquat)
             if first:
-                frame_camera(self.server, sim.d.xpos)
+                frame_camera(self.server, sim.ix.task.robot, sim.d.xpos)
 
     def run_sim(self) -> None:
         g = self._selected(self._gens()) if self.run_dir is not None else None
@@ -354,13 +360,16 @@ def _set(handle, content: str) -> None:
         handle.content = content
 
 
-def frame_camera(server: viser.ViserServer, xpos: np.ndarray) -> None:
-    p = xpos[1:]
-    lo, hi = p.min(0), p.max(0)
-    look = (lo + hi) / 2
-    look[2] = max(lo[2], FLOOR_Z) + 0.1
-    r = max(float(np.max(hi - lo)) / 2, 0.5)
-    pos = look + np.array([0.62, -0.62, 0.48]) * 3.4 * r
+def frame_camera(server: viser.ViserServer, robot: str | None, xpos: np.ndarray) -> None:
+    """Start every viewer where the demonstration was filmed from: behind and above the robot base(s), looking
+    forward across the table, so the sim reads like the clip."""
+    try:
+        origin, f, _ = robot_frame(load_adapter(robot))
+    except Exception:  # noqa: BLE001 - unknown robot: centre on the scene
+        p = xpos[1:]
+        origin, f = (p.min(0)[:2] + p.max(0)[:2]) / 2 - np.array([0.3, 0.0]), np.array([1.0, 0.0])
+    look = np.array([*(origin + 0.3 * f), 0.05])
+    pos = np.array([*(origin - 0.8 * f), 0.85])
     server.initial_camera.position, server.initial_camera.look_at = tuple(pos), tuple(look)
     for c in server.get_clients().values():
         c.camera.position, c.camera.look_at = tuple(pos), tuple(look)
@@ -376,7 +385,7 @@ def main() -> None:
     a = ap.parse_args()
     server = viser.ViserServer(host=a.host, port=a.port, label="WorldGym")
     server.scene.set_up_direction("+z")
-    server.initial_camera.position, server.initial_camera.look_at = (1.4, -1.2, 1.0), (0.0, 0.25, 0.1)
+    server.initial_camera.position, server.initial_camera.look_at = (0.0, -0.8, 0.85), (0.0, 0.3, 0.05)
 
     @server.on_client_connect
     def _(client: viser.ClientHandle) -> None:

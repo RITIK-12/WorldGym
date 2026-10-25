@@ -64,10 +64,11 @@ def scene_from_vu(vu: VideoUnderstanding, adapter: RobotAdapter) -> SceneDraft:
             shape = o.type if o.type in PRIMS else "box"
             objs.append(ObjectSpec(shape=shape, dims_m=[round(v, 4) for v in size], yaw=round(base_yaw, 4),
                                    **{**kw, "is_fixed": fixed or shape == "container"}))
+    wipers = {p.object for p in vu.phases if p.object and p.target and p.action in ("push", "wipe")}
     for p in vu.phases:
         if p.object and p.target and p.action in ("push", "wipe"):
             preds.append(Predicate(kind="wiped_coverage", object_id=p.object, target_id=p.target, limit=0.5))
-        elif p.object and p.target and p.action in ("place", "release"):
+        elif p.object and p.target and p.action in ("place", "release") and p.object not in wipers:
             t = next((x for x in objs if x.id == p.target), None)
             preds.append(Predicate(kind="inside_container" if t is not None and t.shape == "container"
                                    else "on_top_of", object_id=p.object, target_id=p.target))

@@ -1,6 +1,6 @@
 """MuJoCo -> viser mirror: one viser frame per body, geoms sent once, body poses streamed per frame.
 
-Robot visual geoms (group 2) and world/object geoms (group 0) are drawn; collision-only geoms and planes are not.
+Robot visual geoms (group 1 or 2) and world/object geoms (group 0) are drawn; collision-only geoms and planes are not.
 Mesh vertices are welded before sending (the Panda meshes are ~400k split vertices raw, ~70k welded), and every
 geom node is keyed by its content, so switching drafts or perturbing one object re-sends only what changed.
 """
@@ -17,7 +17,7 @@ import viser
 
 FPS = 30
 ROOT = "/twin"
-DRAWN_GROUPS = (0, 2)
+DRAWN_GROUPS = (0, 1, 2)       # objects 0; robot visuals are group 1 (Trossen) or 2 (Panda, YAM); 3+ = collision
 G = mujoco.mjtGeom
 _WELD_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
 _MODEL_CACHE: dict[str, mujoco.MjModel] = {}
