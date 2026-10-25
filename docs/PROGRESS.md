@@ -36,6 +36,7 @@ cp .env.example .env             # add GEMINI_API_KEY
 | 14 | 4-view diagnostic matrix + Loop 1 | done (analytic), Twin Critic wired | displaced twin 47.5 % → 98.3 % alignment in 1 iteration, xy error ≤ 1.1 mm |
 | 15 | Motion extraction + Replay Critic | done | synthetic: carry waypoints 3.0 mm median from ground truth; Draft 1 replays successfully |
 | 16 | Live Managed Agents | done | smoke test 34 s; live swarm agent: 24 sandbox rollouts in 10 min, 6 failing scenarios with a mechanism |
+| 17 | Studio (Viser) | done | 8-step story mode, live run timeline, 3D replay, live "your turn" runs; Panda meshes welded 397k → 70k vertices |
 
 ## Agent architecture (video → sim)
 
@@ -71,6 +72,8 @@ is logged to `.worldgym/api_ledger.jsonl` (gitignored). `WORLDGYM_LLM=replay` ru
 ## How to run
 
 ```bash
+uv run python -m core.pipeline --video demo/synthetic_panda_sort.mp4 --prompt "put the cube and cylinder in the bin"
+uv run python -m app.studio --port 8080          # open http://localhost:8080
 uv run python -m core.rollout tasks/panda_sort.json policies/panda_sort_v3.json --video runs/v3.mp4
 uv run pytest -q
 ```
@@ -126,6 +129,11 @@ uv run pytest -q
   rollouts through `core.bench`, and reported a mechanism the state-conditioned heights miss: grasping the cylinder
   with a fixed 90° yaw turns the ~10 cm hand housing toward the barrier, so with the cylinder within ~4 cm of a
   >= 12 cm barrier the hand strikes its top during descend_grasp (~250 N). 10 min, 1.34M input tokens.
+- **13:14** Studio: run-centric Viser app polling `runs/*/manifest.json` every second (stage chips, errors and
+  refusals included), 3D mirror of the twin with welded meshes, telemetry replay scrubber, and an 8-step story mode
+  (input, twin build with timings, real↔sim matrices per iteration, replay, benchmark, critique with jump-to-time,
+  held-out ratchet, live "your turn" runs with obstacle/object sliders). Draft 3 with the barrier raised to 17 cm and
+  the cube moved succeeded live with 0 unwanted contacts.
 
 ## Lessons (API quirks found today)
 
