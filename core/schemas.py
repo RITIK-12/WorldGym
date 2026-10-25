@@ -41,6 +41,7 @@ class ArmSpec(Strict):
     closing_axis: Literal["x", "y"] = "y"
     gripper: Gripper
     home_qpos: list[float]
+    rest_qpos: list[float] | None = None   # pose the robot sits in when idle (camera calibration); default home_qpos
     vel_limits: list[float]
     robot_bodies: list[str]
     finger_bodies: list[str]
@@ -101,6 +102,13 @@ class CameraSpec(Strict):
     projection: Literal["perspective", "orthographic"] = "perspective"
 
 
+class TableSpec(Strict):
+    """Table slab under the workspace; its top is always z = 0."""
+    center_xy: list[float] = [0.35, 0.0]
+    size_xy: list[float] = [1.1, 1.1]      # full extents
+    thickness: float = 0.04
+
+
 class Phase(Strict):
     t0: float
     t1: float
@@ -111,7 +119,7 @@ class Phase(Strict):
 
 
 PredicateKind = Literal["inside_container", "on_top_of", "max_obstacle_displacement", "terminal_rest",
-                        "max_unwanted_collisions", "pushed_to_region"]
+                        "max_unwanted_collisions", "pushed_to_region", "wiped_coverage"]
 
 
 class Predicate(Strict):
@@ -121,6 +129,7 @@ class Predicate(Strict):
     limit: float | None = None             # metres / count depending on kind
     max_tilt_deg: float = 25.0
     region: list[float] | None = None      # pushed_to_region: [xmin, ymin, xmax, ymax]
+    # wiped_coverage: object_id = the wiper, target_id = the wiped surface, limit = required fraction of its long axis
 
 
 class TaskSpec(Strict):
@@ -130,6 +139,7 @@ class TaskSpec(Strict):
     objects: list[ObjectSpec]
     phases: list[Phase] = []
     cameras: list[CameraSpec] = []
+    table: TableSpec | None = None         # default: TableSpec()
     immutable_success_predicates: list[Predicate] = []
     settle_s: float = 1.0                  # post-policy settle before evaluating
 
@@ -159,9 +169,15 @@ Num = Union[float, Rel]
 
 
 class Primitive(Strict):
+    """kind = "pick_place": pick object_id, place it on/in target_id (or at place_xy_offset_m when no target).
+    kind = "hold": reach and grasp object_id and keep holding it until every other arm is done, then release.
+    kind = "wipe": pick object_id (the wiper), press it on target_id's top and stroke along the target's long axis
+    between wipe_start_m and wipe_end_m (metres from the target centre), then put it back where it was picked."""
+    kind: Literal["pick_place", "hold", "wipe"] = "pick_place"
     arm: str = "arm"
     object_id: str
     target_id: str | None = None
+    sync_after: str | None = None          # wait until this arm is holding (or idle) before starting
     grasp_xy_offset_m: list[float] = [0.0, 0.0]
     grasp_z_depth_m: Num = 0.018
     grasp_yaw_mode: Literal["fixed_world", "object_relative"] = "object_relative"
@@ -182,6 +198,15 @@ class Primitive(Strict):
     release_open_width_m: float = 0.06
     retract_z_m: Num = 0.20
     speed_mps: float = 0.35
+    wipe_start_m: float = -0.15
+    wipe_end_m: float = 0.15
+    wipe_strokes: int = 3                  # passes over the surface (start -> end is one)
+    wipe_press_m: Num = 0.006              # wiper bottom commanded this far below the surface top (contact pressure)
+    wipe_lateral_m: float = 0.0            # offset perpendicular to the wipe axis
+    wipe_speed_mps: float = 0.12
+    wipe_surface_z_m: Num | None = None    # surface top; default = target top (target_rim_z)
+    place_back: bool = True
+    hold_lift_m: float = 0.0               # hold: lift the held object by this much (0 = hold in place)
 
 
 class PolicyConfig(Strict):
