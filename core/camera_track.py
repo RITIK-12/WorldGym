@@ -84,6 +84,8 @@ def _match_h(det, matcher, a, b) -> tuple[np.ndarray | None, int, float]:
     if H is None:
         return None, 0, float("inf")
     inl = inl.ravel().astype(bool)
+    if inl.sum() < MIN_INLIERS:
+        return None, int(inl.sum()), float("inf")
     proj = cv2.perspectiveTransform(src[inl].reshape(-1, 1, 2), H).reshape(-1, 2)
     err = float(np.median(np.linalg.norm(proj - dst[inl], axis=1))) if inl.any() else float("inf")
     return H, int(inl.sum()), err
@@ -103,43 +105,54 @@ def _table_mask(Hw: np.ndarray, rect, shape, scale: float, exclude) -> np.ndarra
 
 
 def track_camera(video: str | Path, ref_t: float, ref_pos, ref_xyaxes, fovy: float, times: list[float],
-                 table_rect=(0.0, 0.0, 1.2, 0.8), exclude=None) -> list[dict]:
-    """Camera pose (MuJoCo pos/xyaxes, fixed fovy) at each time. `exclude(t)` -> pixel boxes (robot, moving objects)
-    to keep out of the reference feature mask."""
+                 table_rect=(0.0, 0.0, 1.2, 0.8), exclude=None, step_s: float = 0.25) -> list[dict]:
+    """Camera pose (MuJoCo pos/xyaxes, fixed fovy) at each requested time. Tracking runs sequentially from the
+    reference in `step_s` steps (forward and backward), so consecutive frames differ little and repetitive textures
+    stay unambiguous; each step also tries the reference directly and keeps whichever match has more inliers.
+    `exclude(t)` -> pixel boxes (robot, moving objects) kept out of the reference feature mask."""
     ref = read_frame(video, ref_t)
     h, w = ref.shape[:2]
     K = intrinsics(fovy, w, h)
     R0, t0 = world_to_cv(ref_pos, ref_xyaxes)
     Hw_ref = plane_homography(K, R0, t0)
-    det = cv2.SIFT_create(N_FEATURES) if hasattr(cv2, "SIFT_create") else cv2.ORB_create(N_FEATURES)
-    norm = cv2.NORM_L2 if hasattr(cv2, "SIFT_create") else cv2.NORM_HAMMING
-    matcher = cv2.BFMatcher(norm)
+    sift = hasattr(cv2, "SIFT_create")
+    det = cv2.SIFT_create(N_FEATURES) if sift else cv2.ORB_create(N_FEATURES)
+    matcher = cv2.BFMatcher(cv2.NORM_L2 if sift else cv2.NORM_HAMMING)
     g_ref, s = _gray(ref)
     S = np.diag([s, s, 1.0])
+    Sinv = np.linalg.inv(S)
     f_ref = _features(det, g_ref, _table_mask(Hw_ref, table_rect, g_ref.shape, s, exclude(ref_t) if exclude else None))
-    out, prev = [], None   # prev = (features, Hw in work pixels) of the last tracked frame
-    for t in sorted(times):
-        g, _ = _gray(read_frame(video, t))
-        f_t = _features(det, g, None)
-        H, n, err = _match_h(det, matcher, f_ref, f_t)
-        method, Hw_s = "direct", None
-        if H is not None:
-            Hw_s = H @ S @ Hw_ref
-        elif prev is not None:
-            H2, n, err = _match_h(det, matcher, prev[0], f_t)
-            if H2 is not None:
-                Hw_s, method = H2 @ prev[1], "chained"
-        if Hw_s is None:
-            out.append({"t": t, "ok": False, "n_inliers": n, "reproj_px": None, "method": "lost"})
-            continue
-        Hw = np.linalg.inv(S) @ Hw_s
-        R, tt = pose_from_plane_h(K, Hw)
-        pos, xy = cv_to_world(R, tt)
-        out.append({"t": t, "ok": True, "pos": pos, "xyaxes": xy, "fovy": fovy, "n_inliers": n,
-                    "reproj_px": round(err / s, 2), "method": method})
-        Hw_tab = Hw_s
-        prev = (_features(det, g, _table_mask(np.linalg.inv(S) @ Hw_tab, table_rect, g.shape, s, None)), Hw_tab)
-    return out
+    want = sorted(set(round(t, 3) for t in times))
+    tmin, tmax = min(want + [ref_t]), max(want + [ref_t])
+    grid = sorted(set([round(ref_t, 3)] + [round(t, 3) for t in np.arange(ref_t, tmax + 1e-6, step_s)]
+                      + [round(t, 3) for t in np.arange(ref_t, tmin - 1e-6, -step_s)] + want))
+    poses: dict[float, dict] = {}
+    for direction in (1, -1):
+        chain = [t for t in grid if (t >= ref_t if direction > 0 else t <= ref_t)]
+        chain = chain if direction > 0 else chain[::-1]
+        prev = (f_ref, S @ Hw_ref)   # (features, world -> work-pixel homography) of the last tracked frame
+        for t in chain:
+            if t == round(ref_t, 3):
+                poses[t] = {"t": t, "ok": True, "pos": list(map(float, ref_pos)), "xyaxes": list(map(float, ref_xyaxes)),
+                            "fovy": fovy, "n_inliers": len(f_ref[0] or []), "reproj_px": 0.0, "method": "reference"}
+                continue
+            g, _ = _gray(read_frame(video, t))
+            f_t = _features(det, g, None)
+            best = None
+            for src, Hw_src, method in ((prev[0], prev[1], "chained"), (f_ref, S @ Hw_ref, "direct")):
+                H, n, err = _match_h(det, matcher, src, f_t)
+                if H is not None and (best is None or n > best[1]):
+                    best = (H @ Hw_src, n, err, method)
+            if best is None:
+                poses[t] = {"t": t, "ok": False, "n_inliers": 0, "reproj_px": None, "method": "lost"}
+                continue
+            Hw_s, n, err, method = best
+            R, tt = pose_from_plane_h(K, Sinv @ Hw_s)
+            pos, xy = cv_to_world(R, tt)
+            poses[t] = {"t": t, "ok": True, "pos": pos, "xyaxes": xy, "fovy": fovy, "n_inliers": n,
+                        "reproj_px": round(err / s, 2), "method": method}
+            prev = (_features(det, g, _table_mask(Sinv @ Hw_s, table_rect, g.shape, s, None)), Hw_s)
+    return [poses[round(t, 3)] for t in sorted(times)]
 
 
 def camera_at(track: list[dict], t: float) -> dict | None:
