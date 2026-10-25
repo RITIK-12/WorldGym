@@ -1,0 +1,10 @@
+{"name": "panda_sort_draft1", "primitives": [
+ {"object_id": "cube", "target_id": "bin", "grasp_yaw_mode": "fixed_world", "grasp_yaw_rad": 1.87,
+  "post_grasp_lift_z_m": 0.15, "transit_apex_z_m": 0.17, "pre_place_hover_z_m": 0.13, "retract_z_m": 0.16,
+  "place_xy_offset_m": [-0.035, 0.0], "place_yaw_mode": "keep", "pre_grasp_open_width_m": 0.08,
+  "release_open_width_m": 0.08, "transit_via_mode": "midpoint"},
+ {"object_id": "cyl", "target_id": "bin", "grasp_yaw_mode": "fixed_world", "grasp_yaw_rad": 1.5708,
+  "post_grasp_lift_z_m": 0.15, "transit_apex_z_m": 0.17, "pre_place_hover_z_m": 0.13, "retract_z_m": 0.16,
+  "place_xy_offset_m": [0.035, 0.0], "place_yaw_mode": "keep", "pre_grasp_open_width_m": 0.08,
+  "release_open_width_m": 0.08, "transit_via_mode": "midpoint"}
+]}

@@ -26,6 +26,7 @@ cp .env.example .env             # add GEMINI_API_KEY
 | 4 | Video QA gate | done | synthetic tripod clip: static 97 %, accepted; handheld / exposure-drift clips refused |
 | 5 | Robot onboarding + self-test | done | Panda 5/5 checks (IK grid max err 0.09 mm, 0.1 kg box lifted 0.218 m) |
 | 6 | Video Architect (Argon) | code done | awaiting GEMINI_API_KEY for the first live call |
+| 7 | Benchmark + locked held-out | done | dev 12 scenarios in ~9 s (8 workers); Draft 1 5/12, v3 10/12 |
 
 ## How to run
 
@@ -49,3 +50,7 @@ uv run pytest -q
   motion-energy keyframes), Video Architect prompt + schema, robot onboarding with a 5-check self-test, and a
   synthetic 1280x720 robot clip with full ground truth (`demo/synthetic_panda_sort.*`) as the oracle for the camera
   solve, Loop 1 and motion extraction.
+- **12:40** Benchmark. Perturbation family (object poses/sizes/mass/friction, obstacle heights, container sizes)
+  with yawed-rectangle rejection sampling and a 2 mm settle gate. Held-out suite: 14 dev-range + 6 harder-family
+  scenarios from an `os.urandom` seed, chmod 444 + sha256, scored once per draft via a ledger, aggregates only.
+  Draft 1 (absolute heights) passes nominal but goes 5/12 on dev (6 barrier collisions); state-conditioned v3: 10/12.

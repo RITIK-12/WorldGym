@@ -25,3 +25,6 @@ replay_cache/
 .DS_Store
 .idea/
 .vscode/
+
+# Locked held-out suites stay on the scoring machine
+benchmarks/*/held_out*
