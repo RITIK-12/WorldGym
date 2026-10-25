@@ -155,14 +155,14 @@ def run_from_task(task_path: str, draft_path: str, name: str | None = None, swar
 
 
 def run_from_video(video: str, prompt: str, name: str | None = None, swarm: str = "local",
-                   backend: str | None = None) -> Run:
+                   backend: str | None = None, force: bool = False) -> Run:
     from core.twin import build_twin
 
     run = new_run("pipeline", name or Path(video).stem, video=video, prompt=prompt)
     run.plan(TWIN_STAGES + POLICY_STAGES)
     argon = Argon(run.dir / "argon", backend)
     try:
-        twin = build_twin(run, video, prompt, argon)
+        twin = build_twin(run, video, prompt, argon, force=force)
     except Refused:
         return run
     run_policy_loops(run, twin["task"], twin["draft1"], twin["adapter"], argon, swarm=swarm,
@@ -179,9 +179,10 @@ def main() -> None:
     ap.add_argument("--name")
     ap.add_argument("--swarm", choices=["local", "antigravity"], default="local")
     ap.add_argument("--backend", choices=["gemini", "replay", "manual"])
+    ap.add_argument("--force", action="store_true", help="continue past a QA refusal (testing only)")
     a = ap.parse_args()
     if a.video:
-        run = run_from_video(a.video, a.prompt, a.name, a.swarm, a.backend)
+        run = run_from_video(a.video, a.prompt, a.name, a.swarm, a.backend, a.force)
     elif a.task and a.draft:
         run = run_from_task(a.task, a.draft, a.name, a.swarm, a.backend)
     else:
