@@ -30,7 +30,7 @@ from core.schemas import ObjectSpec, TaskSpec
 WINDOW_PX = 45
 OFFSET_SCALE_PX = 15.0
 TARGET = 0.90
-MAX_ITERS = 3
+MAX_ITERS = 2
 MIN_SOLIDITY = 0.85   # ragged real footprints (e.g. GrabCut on thin objects) only move the object, never resize it
 EDITABLE = {"xy", "yaw", "dims_m", "shape", "colour", "on_top_of", "z", "is_obstacle", "is_fixed", "parts", "wall_m",
             "mass", "friction", "stem_w_m", "flange_d_m"}
@@ -226,7 +226,7 @@ def _objects_json(task: TaskSpec) -> str:
 
 
 def critique_twin(argon: Argon, task: TaskSpec, views: dict[str, Path], real_frame: Path, metrics: dict,
-                  measured: dict, iteration: int, previous_id: str | None, context: str) -> tuple[ScenePatch, dict]:
+                  measured: dict, iteration: int, memory: list[dict], context: str) -> tuple[ScenePatch, dict]:
     m = {k: v for k, v in metrics.items() if k != "real_claimed"}
     prompt = f"""{context}
 Iteration {iteration}. Current twin objects:
@@ -238,11 +238,14 @@ Static fidelity (per object IoU, centroid offset in px, sim/real size ratio, sco
 Analytic footprint measurements already applied this iteration (metres; rect_yaw/extents from the real footprint):
 {json.dumps(measured, indent=1)}
 
+Your earlier iterations (observations, edits, and the alignment they produced):
+{json.dumps(memory, indent=1) if memory else "none (first iteration)"}
+
 Attachments in order: ghost.jpg, top.jpg, ground.jpg, wire.jpg, real_frame.jpg (clean).
 Return a ScenePatch (iteration = {iteration})."""
     attachments = [views["ghost"], views["top"], views["ground"], views["wire"], real_frame]
     return argon.ask_json(f"twin_critic_iter{iteration}", CRITIC_SYSTEM, prompt, ScenePatch, attachments, model=ARGON,
-                          thinking="high", previous_id=previous_id)
+                          thinking="high")
 
 
 def run_loop1(task: TaskSpec, real_bgr: np.ndarray, real_masks: dict[str, np.ndarray], out_dir: str | Path,
@@ -257,7 +260,7 @@ def run_loop1(task: TaskSpec, real_bgr: np.ndarray, real_masks: dict[str, np.nda
     h, w = real_bgr.shape[:2]
     real_path = out / "real_frame.jpg"
     cv2.imwrite(str(real_path), real_bgr)
-    history, previous_id = [], None
+    history, memory = [], []   # earlier critiques go into the prompt (no server-side chaining for image calls)
 
     def score(t: TaskSpec, tag: str):
         sim = build(t)
@@ -282,10 +285,11 @@ def run_loop1(task: TaskSpec, real_bgr: np.ndarray, real_masks: dict[str, np.nda
                "measured": measured, "views": {k: str(v) for k, v in views.items()}}
         if argon is not None and met["alignment"] < 0.995:
             try:
-                patch, resp = critique_twin(argon, task, views, real_path, met, measured, it, previous_id, context)
-                previous_id = resp.get("interaction_id") or previous_id
+                patch, resp = critique_twin(argon, task, views, real_path, met, measured, it, memory, context)
                 task = _apply_edits(task, patch)
                 sim, met = score(task, "critic")
+                memory.append({"iteration": it, "observations": [o.observation for o in patch.observations][:8],
+                               "edits": [e.model_dump() for e in patch.edits], "alignment_after": met["alignment"]})
                 rec.update(stage="critic", alignment_after_critic=met["alignment"], objects=met["objects"],
                            critique=[o.model_dump() for o in patch.observations],
                            edits=[e.model_dump() for e in patch.edits], added=[o.id for o in patch.add],

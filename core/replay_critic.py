@@ -98,7 +98,7 @@ def run_replay_critic(video: str, task: TaskSpec, draft: PolicyConfig, adapter: 
     ep = run_episode(task, draft)
     err = end_error(ep)
     best = (draft, ep, err)
-    history, prev_id = [], None
+    history = []
     for it in range(1, max_iters + 1):
         clip = side_by_side(video, task, best[1], video_grasp_t, out_dir / f"side_by_side_iter{it}.mp4",
                             best[0].name, cam_at)
@@ -115,12 +115,14 @@ Replay outcome: success={s['success']}, end-pose error vs the last video frame =
 predicates={json.dumps([(p['kind'], p.get('object_id'), p['ok']) for p in s['evaluation']['predicates']])},
 events={json.dumps([(e['type'], e['t'], e.get('pair') or e.get('object')) for e in s['trace']['events']][:25])}
 Waypoints measured from the video (metres, video time): {json.dumps(motion_log['segments'])[:6000]}
+Your earlier iterations (critique, diff, outcome): {json.dumps([{k: h.get(k) for k in ('iteration', 'root_causes',
+                                                                 'diff', 'success', 'end_pose_err_mm', 'kept')}
+                                                               for h in history], default=str)[:4000] or "none"}
 
 The attached side-by-side video is iteration {it}. Return the patch (from_iteration = {it})."""
         try:
-            patch, resp = argon.ask_json(f"replay_critic_iter{it}", SYSTEM, prompt, PolicyPatch, [clip],
-                                         model=ARGON, thinking="high", previous_id=prev_id)
-            prev_id = resp.get("interaction_id") or prev_id
+            patch, _ = argon.ask_json(f"replay_critic_iter{it}", SYSTEM, prompt, PolicyPatch, [clip],
+                                      model=ARGON, thinking="high")
             cand = apply_patch(best[0], patch, name=f"draft1.{it}")
         except PatchError as e:
             history.append({"iteration": it, "error": str(e)})
