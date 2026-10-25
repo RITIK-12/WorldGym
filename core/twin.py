@@ -118,12 +118,14 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
     n_arms = max(1, vu.robot.arms)
 
     with run.stage("robot_onboard") as s:
-        mid = (t_act0 + t_act1) / 2
+        t_full = min((k.t for k in vu.keyframes), default=0.0)   # robot at rest, most of it in view
         fpath = run.path("onboard/real_frame.jpg")
-        cv2.imwrite(str(fpath), _frame(video, mid))
+        cv2.imwrite(str(fpath), _frame(video, t_full))
+        fmid = run.path("onboard/real_frame_mid.jpg")
+        cv2.imwrite(str(fmid), _frame(video, (t_act0 + t_act1) / 2))
         guess = vu.robot.menagerie_dir or "franka_emika_panda"
         try:
-            pick = verify_robot(argon, fpath, guess, run.path("onboard"))
+            pick = verify_robot(argon, [fpath, fmid], guess, run.path("onboard"))
             mdir = pick.menagerie_dir
             s.data["verify"] = pick.model_dump()
         except Exception as e:  # noqa: BLE001 - keep the first-pass guess if the check fails

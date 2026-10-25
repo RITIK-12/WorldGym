@@ -383,18 +383,23 @@ def render_candidates(names: list[str], out: Path, size=(320, 400)) -> Path:
     return out
 
 
-def verify_robot(argon: Argon, frame: Path, guess: str, out_dir: Path, names: list[str] | None = None) -> RobotPick:
-    """Argon compares the real robot with rendered Menagerie candidates (visual verification of its own guess)."""
+def verify_robot(argon: Argon, frames: Path | list[Path], guess: str, out_dir: Path,
+                 names: list[str] | None = None) -> RobotPick:
+    """Argon compares the real robot with rendered Menagerie candidates (visual verification of its own guess).
+    Pass a frame where the whole robot is visible (e.g. at rest) first; close-ups only show wrists and grippers."""
+    frames = [frames] if isinstance(frames, Path) else list(frames)
     names = list(dict.fromkeys([guess, *(names or ARM_CANDIDATES)]))
     sheet = render_candidates(names, out_dir / "candidates.jpg")
     pick, _ = argon.ask_json(
         "robot_verify",
-        "You identify robot arms. Compare the robot in the real video frame with the rendered MuJoCo Menagerie models "
-        "on the contact sheet (each labelled with its directory name, two views each). Judge by link shapes, "
-        "proportions, joint layout, gripper design and colours. Pick exactly one directory name from the sheet.",
-        f"First-pass guess from the video: {guess}. Attachments: real_frame.jpg, candidates.jpg. Which Menagerie "
-        f"directory is this robot? Candidates: {', '.join(names)}.",
-        RobotPick, [frame, sheet], thinking="high")
+        "You identify robot arms. Compare the robot in the real video frames with the rendered MuJoCo Menagerie "
+        "models on the contact sheet (each labelled with its directory name, two views each). Judge by the whole "
+        "arm: link shapes and colours (e.g. white/grey shells vs all-black links), proportions, joint layout and "
+        "gripper design; wrist close-ups alone are ambiguous. Pick exactly one directory name from the sheet.",
+        f"First-pass guess from the video: {guess}. Attachments: {', '.join(f.name for f in frames)} (real frames; the "
+        f"first shows the robot most completely), candidates.jpg. Which Menagerie directory is this robot? "
+        f"Candidates: {', '.join(names)}.",
+        RobotPick, [*frames, sheet], thinking="high")
     if pick.menagerie_dir not in names:
         pick = RobotPick(menagerie_dir=guess, confidence=0.0, reasons=f"invalid pick {pick.menagerie_dir!r}")
     (out_dir / "robot_verify.json").write_text(pick.model_dump_json(indent=1))
