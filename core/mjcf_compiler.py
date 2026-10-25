@@ -225,13 +225,14 @@ def _scene_globals(root: ET.Element) -> None:
     vis = root.find("visual")
     if vis is None:
         vis = ET.SubElement(root, "visual")
-    for tag in ("global", "headlight", "map", "quality"):
+    for tag in ("global", "headlight", "map", "quality", "scale"):
         for el in vis.findall(tag):
             vis.remove(el)
     vis.append(ET.Element("global", offwidth="1920", offheight="1080", azimuth="150", elevation="-25"))
     vis.append(ET.Element("headlight", diffuse="0.35 0.35 0.35", ambient="0.28 0.28 0.28", specular="0 0 0"))
     vis.append(ET.Element("map", force="0.004"))
     vis.append(ET.Element("quality", shadowsize="2048"))
+    vis.append(ET.Element("scale", forcewidth="0.012", contactwidth="0.02", contactheight="0.004"))
     root.append(ET.Element("statistic", center="0.4 0 0.15", extent="0.9"))
 
 

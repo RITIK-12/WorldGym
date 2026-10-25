@@ -1,0 +1,17 @@
+{"name": "panda_sort_v3", "primitives": [
+ {"object_id": "cube", "target_id": "bin", "grasp_yaw_mode": "object_relative", "grasp_yaw_rad": 1.5708,
+  "reach_clearance_z_m": {"terms": ["max_scene_top_z"], "offset": 0.07},
+  "post_grasp_lift_z_m": {"terms": ["max_scene_top_z", "held_below_tcp"], "offset": 0.05},
+  "transit_apex_z_m": {"terms": ["max_scene_top_z", "held_below_tcp"], "offset": 0.06},
+  "pre_place_hover_z_m": {"terms": ["target_rim_z", "held_below_tcp"], "offset": 0.04},
+  "retract_z_m": {"terms": ["max_scene_top_z"], "offset": 0.07},
+  "place_xy_offset_m": [-0.035, 0.0], "place_yaw_mode": "container_relative", "place_yaw_rad": 0.0,
+  "release_open_width_m": 0.06},
+ {"object_id": "cyl", "target_id": "bin", "grasp_yaw_mode": "fixed_world", "grasp_yaw_rad": 1.5708,
+  "reach_clearance_z_m": {"terms": ["max_scene_top_z"], "offset": 0.07},
+  "post_grasp_lift_z_m": {"terms": ["max_scene_top_z", "held_below_tcp"], "offset": 0.05},
+  "transit_apex_z_m": {"terms": ["max_scene_top_z", "held_below_tcp"], "offset": 0.06},
+  "pre_place_hover_z_m": {"terms": ["target_rim_z", "held_below_tcp"], "offset": 0.04},
+  "retract_z_m": {"terms": ["max_scene_top_z"], "offset": 0.07},
+  "place_xy_offset_m": [0.035, 0.0], "release_open_width_m": 0.06}
+]}
