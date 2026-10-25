@@ -11,6 +11,9 @@ qa (static, or moving-camera mode for handheld clips)
 """
 from __future__ import annotations
 
+import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -91,6 +94,23 @@ def calib_boxes(argon: Argon, frame_path: Path, vu: VideoUnderstanding, n_arms: 
     return boxes
 
 
+def publish_gen(run: Run, n: int, title: str, headline: str, task: TaskSpec, adapter: RobotAdapter,
+                policy=None) -> None:
+    """Checkpoint a viewable result (gens/genN): the twin, plus its replay when a policy exists. The demo UI shows
+    the newest generation while the next one is still being critiqued."""
+    d = run.path(f"gens/gen{n}")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "task.json").write_text(task.model_dump_json(indent=1))
+    if policy is not None:
+        (d / "policy.json").write_text(policy.model_dump_json(indent=1))
+        run_episode(task, policy, adapter, out_dir=d / "nominal")
+    idx = run.path("gens/gens.json")
+    gens = json.loads(idx.read_text()) if idx.exists() else []
+    gens = [g for g in gens if g["n"] != n] + [{"n": n, "title": title, "headline": headline,
+                                                 "replay": policy is not None, "t": time.time()}]
+    idx.write_text(json.dumps(sorted(gens, key=lambda g: g["n"]), indent=1))
+
+
 def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = False) -> dict:
     with run.stage("qa") as s:
         pr = probe(video, run.path("qa"))
@@ -116,6 +136,10 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
     t_act0 = min((p.t0 for p in active), default=0.0)
     t_act1 = max((p.t1 for p in active), default=float(pr["duration_s"]))
     n_arms = max(1, vu.robot.arms)
+    # dense labelling needs only the video and the phases: run the labelling swarm alongside the twin stages
+    label_times = [round(t, 2) for t in np.arange(t_act0, t_act1 + 1e-6, LABEL_DT)][:160]
+    pool = ThreadPoolExecutor(max_workers=1)
+    labels_job = pool.submit(dense_labels, video, label_times, vu, argon, run.path("motion"))
 
     with run.stage("robot_onboard") as s:
         t_full = min((k.t for k in vu.keyframes), default=0.0)   # robot at rest, most of it in view
@@ -222,6 +246,7 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
             draft = fallback_scene(vu, measured)
             s.data["author_error"] = str(e)[:300]
         task = make_task(run.run_id.split("_", 1)[-1] or "twin", adapter.robot_id, draft, cam_task, vu)
+        publish_gen(run, 1, "First world", f"{len(task.objects)} objects placed by the Scene Author", task, adapter)
         context = f"Task: {vu.success_intent}. Robot: {adapter.robot_id} ({n_arms} arm(s))."
         res = run_loop1(task, frame, masks, run.path("loop1"), argon=argon, context=context,
                         robot_mask=best["mask"], build=lambda t: posed_sim(t, adapter, pose))
@@ -236,8 +261,8 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
                         run.rel(res["final_views"]["matrix"])]
 
     with run.stage("motion_extract") as s:
-        times = [round(t, 2) for t in np.arange(t_act0, t_act1 + 1e-6, LABEL_DT)][:160]
-        labels = dense_labels(video, times, vu, argon, run.path("motion"))
+        labels = labels_job.result()
+        pool.shutdown()
         run.write_json("motion/labels.json", [k.model_dump() for k in labels])
         sim = build_sim(task, adapter)
         if n_arms > 1 or moving:
@@ -258,6 +283,9 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
                       + (f" · end error {err:.0f} mm" if err is not None else ""))
         s.data = {"segments": log["segments"], "dynamic": dyn, "n_labels": len(labels)}
         s.artifacts += ["motion/labels.json", "motion/motion_extract.json", "motion/draft1.json"]
+        publish_gen(run, 2, "Twin + demonstrated motion",
+                    f"Twin Critic alignment {res['alignment'] * 100:.0f} % · motion from {len(labels)} labelled frames",
+                    task, adapter, draft1)
 
     with run.stage("replay_critic") as s:
         grasp_t = log["segments"][0]["grasp_t"]
@@ -272,6 +300,9 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
         s.headline = ("replay " + ("succeeds" if rc["episode"].success else "fails")
                       + (f" · end error {e0:.0f} → {e1:.0f} mm" if e0 is not None and e1 is not None else ""))
         s.data = {"history": rc["history"], "dynamic": dyn}
+        publish_gen(run, 3, "Motion refined by the Replay Critic",
+                    f"end-pose error {e0:.0f} → {e1:.0f} mm" if e0 is not None and e1 is not None else s.headline,
+                    task, adapter, draft1)
         s.artifacts += [run.rel(rc["video"])] + [run.rel(h["video"]) for h in rc["history"] if h.get("video")]
     return {"task": task, "draft1": draft1, "adapter": adapter, "dynamic_ref": dyn, "vu": vu}
 
