@@ -1,0 +1,27 @@
+# Private planning docs stay local; only the progress log is public
+docs/*
+!docs/PROGRESS.md
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Large / generated
+assets/menagerie/
+runs/
+replay_cache/
+*.mp4
+!demo/*.mp4
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
