@@ -37,7 +37,7 @@ def _gt_camera(s):
 
 def test_apply_solution_and_quat(sim):
     task = sim.ix.task
-    assert [c.name for c in task.cameras] == ["front", "side", "top", "video"]
+    assert [c.name for c in task.cameras] == ["front", "side", "top", "ground", "video"]
     video = task.cameras[-1]
     assert (video.w, video.h, video.fovy) == (W, H, GT_FOVY) and np.allclose(video.xyaxes, GT_XY)
     pos, quat = sim.compiled_cam

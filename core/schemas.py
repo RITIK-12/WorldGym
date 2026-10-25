@@ -58,7 +58,16 @@ class RobotAdapter(Strict):
 # Task / scene
 # ----------------------------------------------------------------------------------------------------------------------
 
-Shape = Literal["box", "cylinder", "sphere", "capsule", "tblock", "container"]
+Shape = Literal["box", "cylinder", "sphere", "capsule", "tblock", "container", "composite"]
+
+
+class Part(Strict):
+    """One primitive of a composite object, in the object frame (origin = bounding-box centre).
+    Parts are rescaled per axis so their joint bounding box matches the object's dims_m."""
+    shape: Literal["box", "cylinder", "sphere", "capsule"]
+    dims_m: list[float]                    # full extents, same convention as ObjectSpec
+    pos: list[float] = [0.0, 0.0, 0.0]
+    euler: list[float] = [0.0, 0.0, 0.0]   # xyz radians; cylinders/capsules run along the part's z axis
 
 
 class ObjectSpec(Strict):
@@ -77,6 +86,7 @@ class ObjectSpec(Strict):
     wall_m: float = 0.008                  # container wall / floor thickness
     stem_w_m: float | None = None          # tblock stem width (default = 0.4 * y extent)
     flange_d_m: float | None = None        # tblock flange depth along y (default = 0.4 * y extent)
+    parts: list[Part] | None = None        # composite only
     material: str | None = None
 
 

@@ -32,6 +32,31 @@ cp .env.example .env             # add GEMINI_API_KEY
 | 10 | Pipeline orchestrator (policy half) | done (replay-tested) | replay → benchmark → Loop 2 → Loop 3 → report, all stages in the run manifest |
 | 11 | Live Gemini API + spend guard | done | Argon text + video/image calls verified; ~$0.006 spent on smoke tests |
 | 12 | Video Architect on a real clip | done | 36 s handheld dual-arm wiping clip: 1 call, 142 s, ~$0.11, valid JSON first try |
+| 13 | Camera solve from the robot silhouette | done | synthetic: IoU 0.962, camera position error 0.52 cm |
+| 14 | 4-view diagnostic matrix + Loop 1 | done (analytic), Twin Critic wired | displaced twin 47.5 % → 98.3 % alignment in 1 iteration, xy error ≤ 1.1 mm |
+
+## Agent architecture (video → sim)
+
+Problem statement 2: build a system that renders what it made, watches the result, critiques it against the goal and
+fixes it in a loop. Python orchestrates deterministically; every agent is a role prompt + a typed output contract +
+a numeric verification signal it is judged by (never another model's opinion).
+
+| Agent | Model | Watches | Produces | Verified by |
+|---|---|---|---|---|
+| Video Architect | gemini-4-argon, high | full clip + keyframes in one context | robot, objects, phases, keyframes, rest frame | downstream fits |
+| Spatial labellers (parallel) | gemini-robotics-er-2-preview | frame batches | per-frame boxes, fingertip points, open/held | track consistency |
+| Robot onboarding | Argon / Antigravity agent | Menagerie MJCF summary | RobotAdapter | 5-check self-test |
+| Camera solver | numeric (render-and-compare) | robot silhouette at rest | camera pose + fovy, metric scale | silhouette IoU |
+| Scene Author | Argon, high | rest frame + masks + back-projected positions | TaskSpec (primitives / composites) | static fidelity |
+| **Twin Critic — Loop 1** | Argon, high, multi-turn | **4-view matrix**: ghost overlay, ortho top 5 cm grid, ground view, collision wireframe | ScenePatch | per-object IoU / offset / alignment |
+| Replay Critic | Argon, high | real clip vs synced sim replay | waypoint / timing patch | end-pose error, event timing |
+| Skill Critic — Loop 2 | Argon, high | failing rollout video + event frames + fact trace | PolicyPatch | dev suite, held-out once |
+| Adversarial swarm — Loop 3 | Antigravity Managed Agents (parallel) | perturbation ranges + bench CLI | least-extreme failing scenarios | rollouts in sandbox |
+| Hardener | Argon, high | swarm reports | state-conditioned policy | dev + adversarial + held-out |
+| Referee | locked evaluator (no model) | final sim state | success predicates | sha256 lock |
+
+The Twin Critic keeps server-side state across iterations (`previous_interaction_id`), so each critique sees what it
+already tried; independent critiques (per object / per view / per hypothesis) run in parallel.
 
 ## Runaway-loop guard (not a spend limit)
 
@@ -81,6 +106,12 @@ uv run pytest -q
   ten phases (left arm holds the bar, right arm wipes 11.8-23.8 s, places and releases the sponge) and 15 keyframes
   whose boxes, fingertip points and open/held states check out on an overlay. Fixed the architect to send the full
   clip so video time and keyframe timestamps share one time base.
+- **12:47** Twin side of the PS2 loop. Composite objects (parts rescaled to `dims_m`) so real items such as a grab
+  bar on two blocks can be described. 4-view diagnostic matrix: ghost overlay, ortho top with 5 cm grid and the real
+  footprints (silhouette back-projected at the table and at the object top, intersected), ground view with height
+  lines, collision wireframe. Loop 1: metrics per spec, analytic footprint patch (xy, yaw, extents) then the Twin
+  Critic (Argon, multi-turn) returning a validated ScenePatch. Camera solve from the robot silhouette landed
+  (grid + Levenberg-Marquardt + Powell; IoU 0.962, 0.52 cm).
 
 ## Lessons (API quirks found today)
 

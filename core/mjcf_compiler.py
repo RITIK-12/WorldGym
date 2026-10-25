@@ -16,7 +16,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from core.schemas import CameraSpec, ObjectSpec, RobotAdapter, TaskSpec
+from core.schemas import CameraSpec, ObjectSpec, Part, RobotAdapter, TaskSpec
 
 REPO = Path(__file__).resolve().parents[1]
 MENAGERIE = REPO / "assets" / "menagerie"
@@ -33,6 +33,7 @@ DEFAULT_CAMERAS = [
     CameraSpec(name="front", pos=[1.45, 0.0, 0.75], look_at=[0.45, 0.0, 0.05], fovy=45),
     CameraSpec(name="side", pos=[0.45, -1.15, 0.45], look_at=[0.45, 0.0, 0.08], fovy=45),
     CameraSpec(name="top", pos=[0.45, 0.0, 1.5], xyaxes=[0, 1, 0, -1, 0, 0], fovy=0.9, projection="orthographic"),
+    CameraSpec(name="ground", pos=[0.45, -1.3, 0.05], look_at=[0.45, 0.0, 0.05], fovy=30),
 ]
 
 
@@ -77,31 +78,80 @@ def _fmt(v) -> str:
     return " ".join(f"{float(x):.6g}" for x in np.atleast_1d(v))
 
 
-def object_geoms(o: ObjectSpec) -> list[tuple[str, str, list[float], list[float]]]:
-    """(name, type, size, pos-in-body) for every geom of an object; body origin = bounding-box centre."""
+def _euler_R(e) -> np.ndarray:
+    cx, cy, cz = np.cos(e)
+    sx, sy, sz = np.sin(e)
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    return Rx @ Ry @ Rz  # MuJoCo eulerseq "xyz" (intrinsic)
+
+
+def _part_half(p: Part) -> np.ndarray:
+    d = p.dims_m
+    if p.shape == "sphere":
+        return np.full(3, d[0] / 2)
+    if p.shape in ("cylinder", "capsule"):
+        return np.array([d[0] / 2, d[0] / 2, d[2] / 2])
+    return np.array(d[:3]) / 2
+
+
+def _composite_geoms(o: ObjectSpec) -> list[tuple]:
+    parts = o.parts or []
+    if not parts:
+        raise ValueError(f"composite {o.id} has no parts")
+    Rs = [_euler_R(np.asarray(p.euler, float)) for p in parts]
+    lo = np.min([np.asarray(p.pos) - np.abs(R) @ _part_half(p) for p, R in zip(parts, Rs)], 0)
+    hi = np.max([np.asarray(p.pos) + np.abs(R) @ _part_half(p) for p, R in zip(parts, Rs)], 0)
+    centre, ext = (lo + hi) / 2, np.maximum(hi - lo, 1e-6)
+    scale = np.asarray(o.dims_m[:3], float) / ext           # fit the parts' joint bbox to dims_m
+    out = []
+    for k, (p, R) in enumerate(zip(parts, Rs)):
+        s_local = np.abs(R).T @ scale                       # world-axis scale expressed in the part frame
+        half = _part_half(p) * s_local
+        pos = (np.asarray(p.pos) - centre) * scale
+        name = f"{o.id}_p{k}"
+        if p.shape == "box":
+            size = half.tolist()
+        elif p.shape == "sphere":
+            size = [float(half.mean())]
+        elif p.shape == "cylinder":
+            size = [float((half[0] + half[1]) / 2), float(half[2])]
+        else:  # capsule: half[2] is the half length including the caps
+            r = float((half[0] + half[1]) / 2)
+            size = [r, max(float(half[2]) - r, 1e-4)]
+        out.append((name, p.shape, size, pos.tolist(), list(p.euler)))
+    return out
+
+
+def object_geoms(o: ObjectSpec) -> list[tuple]:
+    """(name, type, size, pos-in-body, euler) for every geom of an object; body origin = bounding-box centre."""
     d = o.dims_m
+    z = [0, 0, 0]
     if o.shape == "box":
-        return [(o.id, "box", [d[0] / 2, d[1] / 2, d[2] / 2], [0, 0, 0])]
+        return [(o.id, "box", [d[0] / 2, d[1] / 2, d[2] / 2], [0, 0, 0], z)]
     if o.shape == "cylinder":
-        return [(o.id, "cylinder", [d[0] / 2, d[2] / 2], [0, 0, 0])]
+        return [(o.id, "cylinder", [d[0] / 2, d[2] / 2], [0, 0, 0], z)]
     if o.shape == "sphere":
-        return [(o.id, "sphere", [d[0] / 2], [0, 0, 0])]
+        return [(o.id, "sphere", [d[0] / 2], [0, 0, 0], z)]
     if o.shape == "capsule":
         r = d[0] / 2
-        return [(o.id, "capsule", [r, max(d[2] / 2 - r, 1e-4)], [0, 0, 0])]
+        return [(o.id, "capsule", [r, max(d[2] / 2 - r, 1e-4)], [0, 0, 0], z)]
     if o.shape == "tblock":
         fd = o.flange_d_m or 0.4 * d[1]
         sw = o.stem_w_m or 0.4 * d[1]
         stem_len = d[1] - fd
-        return [(f"{o.id}_flange", "box", [d[0] / 2, fd / 2, d[2] / 2], [0, d[1] / 2 - fd / 2, 0]),
-                (f"{o.id}_stem", "box", [sw / 2, stem_len / 2, d[2] / 2], [0, -fd / 2, 0])]
+        return [(f"{o.id}_flange", "box", [d[0] / 2, fd / 2, d[2] / 2], [0, d[1] / 2 - fd / 2, 0], z),
+                (f"{o.id}_stem", "box", [sw / 2, stem_len / 2, d[2] / 2], [0, -fd / 2, 0], z)]
     if o.shape == "container":
         X, Y, H, w = d[0], d[1], d[2], o.wall_m
-        return [(f"{o.id}_floor", "box", [X / 2, Y / 2, w / 2], [0, 0, -H / 2 + w / 2]),
-                (f"{o.id}_wall_px", "box", [w / 2, Y / 2, H / 2], [X / 2 - w / 2, 0, 0]),
-                (f"{o.id}_wall_nx", "box", [w / 2, Y / 2, H / 2], [-X / 2 + w / 2, 0, 0]),
-                (f"{o.id}_wall_py", "box", [X / 2 - w, w / 2, H / 2], [0, Y / 2 - w / 2, 0]),
-                (f"{o.id}_wall_ny", "box", [X / 2 - w, w / 2, H / 2], [0, -Y / 2 + w / 2, 0])]
+        return [(f"{o.id}_floor", "box", [X / 2, Y / 2, w / 2], [0, 0, -H / 2 + w / 2], z),
+                (f"{o.id}_wall_px", "box", [w / 2, Y / 2, H / 2], [X / 2 - w / 2, 0, 0], z),
+                (f"{o.id}_wall_nx", "box", [w / 2, Y / 2, H / 2], [-X / 2 + w / 2, 0, 0], z),
+                (f"{o.id}_wall_py", "box", [X / 2 - w, w / 2, H / 2], [0, Y / 2 - w / 2, 0], z),
+                (f"{o.id}_wall_ny", "box", [X / 2 - w, w / 2, H / 2], [0, -Y / 2 + w / 2, 0], z)]
+    if o.shape == "composite":
+        return _composite_geoms(o)
     raise ValueError(o.shape)
 
 
@@ -260,12 +310,13 @@ def _append_world(root: ET.Element, task: TaskSpec) -> None:
         body = ET.SubElement(wb, "body", name=o.id, pos=_fmt([o.xy[0], o.xy[1], cz]), euler=f"0 0 {o.yaw:.6g}")
         if not o.is_fixed:
             body.append(ET.Element("freejoint", name=f"{o.id}_free"))
-        vol = sum(_geom_volume(t, s) for _, t, s, _ in geoms)
+        vol = sum(_geom_volume(t, s) for _, t, s, _, _ in geoms)
         density = o.mass / vol
-        for name, gtype, size, pos in geoms:
+        for name, gtype, size, pos, euler in geoms:
+            extra = {"euler": _fmt(euler)} if any(euler) else {}
             body.append(ET.Element("geom", name=name, type=gtype, size=_fmt(size), pos=_fmt(pos),
                                    rgba=_fmt(o.colour), density=f"{density:.6g}",
-                                   friction=f"{o.friction:.4g} 0.005 0.0001", **OBJ_SOLVER))
+                                   friction=f"{o.friction:.4g} 0.005 0.0001", **extra, **OBJ_SOLVER))
 
     named = {c.name: c for c in DEFAULT_CAMERAS}
     named.update({c.name: c for c in task.cameras})  # task cameras override defaults by name
