@@ -31,6 +31,7 @@ cp .env.example .env             # add GEMINI_API_KEY
 | 9 | Loop 3 swarm | done (local), live path written | 4 hypotheses x 24 rollouts each find failures in v3 |
 | 10 | Pipeline orchestrator (policy half) | done (replay-tested) | replay → benchmark → Loop 2 → Loop 3 → report, all stages in the run manifest |
 | 11 | Live Gemini API + spend guard | done | Argon text + video/image calls verified; ~$0.006 spent on smoke tests |
+| 12 | Video Architect on a real clip | done | 36 s handheld dual-arm wiping clip: 1 call, 142 s, ~$0.11, valid JSON first try |
 
 ## API spend guard
 
@@ -74,6 +75,12 @@ uv run pytest -q
 - **12:24** Pipeline orchestrator for the policy half, verified offline with the replay backend. Live API wired
   in: key loaded from `.env` (repo or parent folder), per-call `max_output_tokens` caps, `thinking_level` medium by
   default (high only for the Video Architect, critic and hardening, low for dense labels), and the spend guard above.
+- **12:30** First live Video Architect run on a real 36 s handheld clip of a dual-arm robot wiping a steel bar with a
+  sponge. The QA gate refuses it for the twin pipeline (camera static 13 %, exposure range 46, over 30 s), as
+  designed. Run directly, Argon identified a Trossen WidowX AI pair (`trossen_wxai`, confidence 0.9), both objects,
+  ten phases (left arm holds the bar, right arm wipes 11.8-23.8 s, places and releases the sponge) and 15 keyframes
+  whose boxes, fingertip points and open/held states check out on an overlay. Fixed the architect to send the full
+  clip so video time and keyframe timestamps share one time base.
 
 ## Lessons (API quirks found today)
 
