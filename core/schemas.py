@@ -47,12 +47,20 @@ class ArmSpec(Strict):
     finger_bodies: list[str]
 
 
+class TableSpec(Strict):
+    """Table slab under the workspace; its top is always z = 0."""
+    center_xy: list[float] = [0.35, 0.0]
+    size_xy: list[float] = [1.1, 1.1]      # full extents
+    thickness: float = 0.04
+
+
 class RobotAdapter(Strict):
     robot_id: str
     menagerie_dir: str
     mjcf: str
     arms: list[ArmSpec]
     base_poses: list[list[float]] = [[0.0, 0.0, 0.0, 0.0]]  # (x, y, z, yaw) per arm
+    table: TableSpec | None = None         # default table for this robot's workspace
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -102,13 +110,6 @@ class CameraSpec(Strict):
     projection: Literal["perspective", "orthographic"] = "perspective"
 
 
-class TableSpec(Strict):
-    """Table slab under the workspace; its top is always z = 0."""
-    center_xy: list[float] = [0.35, 0.0]
-    size_xy: list[float] = [1.1, 1.1]      # full extents
-    thickness: float = 0.04
-
-
 class Phase(Strict):
     t0: float
     t1: float
@@ -139,7 +140,7 @@ class TaskSpec(Strict):
     objects: list[ObjectSpec]
     phases: list[Phase] = []
     cameras: list[CameraSpec] = []
-    table: TableSpec | None = None         # default: TableSpec()
+    table: TableSpec | None = None         # default: the adapter's table, else TableSpec()
     immutable_success_predicates: list[Predicate] = []
     settle_s: float = 1.0                  # post-policy settle before evaluating
 
