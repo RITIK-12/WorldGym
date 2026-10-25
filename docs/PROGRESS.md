@@ -39,6 +39,11 @@ cp .env.example .env             # add GEMINI_API_KEY
 | 17 | Studio (Viser) | done | 8-step story mode, live run timeline, 3D replay, live "your turn" runs; Panda meshes welded 397k → 70k vertices |
 | 18 | Bimanual Trossen WidowX AI | done | onboarding agent wrote the adapter in its sandbox; both arms pass the self-test |
 | 19 | Dual-arm hold + wipe primitives | done | synthetic bar wipe: coverage 100 %, sponge returned, 0 unwanted contacts |
+| 20 | Robot identity check by rendered candidates | done | user's clip: Argon corrected "Trossen WidowX AI" → `i2rt_yam` (0.98) |
+| 21 | Bimanual i2rt YAM | done | generated with MjSpec.attach; both arms pass the self-test |
+| 22 | Moving camera (handheld) | done | synthetic orbit ≤ 0.5 mm; real clip: metric table grid tracks the mat over 3-33 s |
+| 23 | Multi-arm motion extraction | done | synthetic labels: hold at -0.158 m (truth -0.16), 4 strokes (truth 4), replay succeeds |
+| 24 | NVIDIA SimReady assets as a Scene Author tool | done | search → fetch → USD convert → mesh object; wipe with a SimReady sponge succeeds |
 
 ## Agent architecture (video → sim)
 
@@ -148,6 +153,22 @@ uv run pytest -q
   (> 6 DOF) arms: on 6-DOF arms it made a holding arm drift off its grasp. An arm-clearance sweep showed wiping the
   bar left of x = 0.05 m makes the two elbows meet, so the synthetic task wipes [0.08, 0.17] m: 100 % coverage, 0
   unwanted contacts.
+- **14:05** Real-clip path. Argon's first guess for the user's robot (Trossen WidowX AI, 0.9) was wrong: a new check
+  renders 13 Menagerie candidates on one contact sheet and Argon picks by appearance ("QDD actuators with green LEDs,
+  white forearm, D405 bracket, triangular truss fingers") → `i2rt_yam`, 0.98. YAM adapter with an IK-found top-down
+  home; its soft elbow servo overshoots commanded joint speed by ~35 %, so commanded speed is capped at 70 % of the
+  (estimated) 3.14 rad/s limit for this arm, and the self-test judges sustained speed (99.5th percentile). Bimanual
+  YAM built reproducibly with `MjSpec.attach` (bases 0.6 m apart, both facing the workspace); both arms pass. The QA
+  gate now treats a handheld clip as moving-camera mode instead of refusing it: the camera is solved once from the
+  robot silhouette (Robotics-ER box per arm → GrabCut; IoU 0.73 on the user's clip with the bases out of frame) and
+  tracked on the table plane (SIFT + RANSAC homographies, sequential with re-anchoring); a 5 cm metric grid
+  re-projected through the tracked camera lies on the real mat from 3 s to 33 s. Multi-arm Draft 1: fixed held
+  objects become `hold`, push/wipe phases become `wipe` (span and stroke count from the fingertip track along the
+  target), other arms sync after the holding arm. NVIDIA SimReady: the public USD Search API (metric bounding boxes
+  included) + `nvidia/simready-assets` packages (CC-BY 4.0, attribution recorded), converted with pxr (instanced
+  geometry, convex collision meshes, authored mass, grasp points); the Scene Author can call it as a function tool
+  (Interactions `requires_action` → `function_result` loop) and sees thumbnails. A SimReady sponge in the bimanual
+  wipe: 100 % coverage, 0 unwanted contacts. Incomplete interactions (output budget) now retry with a doubled budget.
 
 ## Lessons (API quirks found today)
 
@@ -160,3 +181,7 @@ uv run pytest -q
 - Setting `response_mime_type` without a full `response_format` schema is a 400 in synchronous mode. JSON is
   enforced by the prompt contract + pydantic validation + one re-ask instead.
 - Video costs ~1.2k input tokens for a 16 s 640 px clip, an image ~1.1k: a full Video Architect call is cents.
+- A long hardening prompt at `thinking_level="high"` can end `incomplete` (thinking + answer share the output
+  window); text-only calls can be retried in background mode with a larger `max_output_tokens`.
+- Function calling: the interaction stops with `requires_action` and `function_call` steps; answering with
+  `function_result` steps and `previous_interaction_id` continues the same chain. Results may include images.
