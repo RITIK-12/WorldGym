@@ -19,6 +19,7 @@ CLEARANCE_M = 0.008
 SETTLE_STEPS = 300
 SETTLE_DRIFT_M = 0.002
 WORKSPACE = (0.25, 0.68, -0.32, 0.32)   # x0, x1, y0, y1 reachable with a top-down grasp
+TABLE_MARGIN_M = 0.03
 
 
 class ObjRange(BaseModel):
@@ -104,8 +105,21 @@ def rect_distance(a: ObjectSpec, b: ObjectSpec) -> float:
     return float(best)
 
 
+def workspace(task: TaskSpec) -> tuple[float, float, float, float]:
+    """Top-down reach box of the single Panda cell; a robot with its own table (bimanual) uses that table."""
+    from core.mjcf_compiler import load_adapter
+
+    adapter = load_adapter(task.robot)
+    table = task.table or adapter.table
+    if table is None:
+        return WORKSPACE
+    (cx, cy), (sx, sy) = table.center_xy, table.size_xy
+    m = TABLE_MARGIN_M
+    return cx - sx / 2 + m, cx + sx / 2 - m, cy - sy / 2 + m, cy + sy / 2 - m
+
+
 def layout_ok(task: TaskSpec) -> tuple[bool, str]:
-    x0, x1, y0, y1 = WORKSPACE
+    x0, x1, y0, y1 = workspace(task)
     ground = [o for o in task.objects if not o.on_top_of]
     for o in ground:
         corners = _corners(*_footprint(o))
