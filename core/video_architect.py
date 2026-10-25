@@ -2,7 +2,8 @@
 
 Argon identifies the robot (closest Menagerie model), the objects (shape vocabulary + full-extent size guesses),
 task phases, per-keyframe robot/object boxes and the gripper point/open/held state, a rest frame for the camera
-solve and a verbal camera estimate. Gemini Robotics-ER 2 subagents (spatial pointing specialists) then label extra
+solve and a verbal camera estimate. A review pass draws those labels onto the keyframes and Argon corrects its own
+mistakes (the render-watch-fix loop applied to perception). Gemini Robotics-ER 2 subagents (spatial pointing specialists) then label extra
 frames densely, in parallel batches, for tracking and motion extraction.
 
 Coordinates follow the Gemini convention: boxes [ymin, xmin, ymax, xmax] and points [y, x], normalised 0..1000.
@@ -12,7 +13,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import cv2
 import imageio_ffmpeg
+import numpy as np
 from pydantic import BaseModel
 
 from core.argon import ARGON, ROBOTICS_ER, Argon, run_parallel
@@ -70,7 +73,7 @@ def _kf_list(paths: list[Path], times: list[float]) -> str:
 
 
 def understand(video: str | Path, probe: dict, prompt: str, argon: Argon, out_dir: str | Path,
-               n_extra: int = 6) -> VideoUnderstanding:
+               n_extra: int = 6, review: bool = True) -> VideoUnderstanding:
     from core.video_probe import extract_frames
 
     out_dir = Path(out_dir)
@@ -106,12 +109,78 @@ Produce:
 - rest_frame_t: one of the keyframe times where the robot is at a rest/home pose and fully visible.
 - success_intent: one sentence of what success means for this task.
 - camera_guess."""
-    vu, _ = argon.ask_json("video_architect", SYSTEM, text, VideoUnderstanding, [small, *frames], model=ARGON,
-                           thinking="high")
+    vu, resp = argon.ask_json("video_architect", SYSTEM, text, VideoUnderstanding, [small, *frames], model=ARGON,
+                              thinking="high")
     snap = {round(t, 2) for t in times}
     for kf in vu.keyframes:
         kf.t = min(snap, key=lambda s: abs(s - kf.t))
+    if review:
+        vu = review_labels(video, vu, argon, out_dir / "review", resp.get("interaction_id"))
     return vu
+
+
+REVIEW_SYSTEM = SYSTEM + """
+You are now reviewing your own labels. Each attached image is a keyframe with your labels drawn on it: object boxes
+(colour per id, labelled), the robot box (white), and the gripper point (circle: red = closed, green = open, with the
+held object). Fix every box that is not tight on its object, every gripper point not at the fingertip midpoint, and
+every wrong open/held state. Return the full corrected VideoUnderstanding (same ids, same keyframe times)."""
+
+
+def draw_labels(frame, kf: Keyframe) -> np.ndarray:
+    img = frame.copy()
+    h, w = img.shape[:2]
+    rng = np.random.default_rng(7)
+    cols = {}
+
+    def box(b, col, label):
+        y0, x0, y1, x1 = b
+        p0, p1 = (int(x0 * w / 1000), int(y0 * h / 1000)), (int(x1 * w / 1000), int(y1 * h / 1000))
+        cv2.rectangle(img, p0, p1, col, 2)
+        cv2.putText(img, label, (p0[0], max(14, p0[1] - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2, cv2.LINE_AA)
+
+    if kf.robot_box:
+        box(kf.robot_box, (255, 255, 255), "robot")
+    for oid, b in kf.object_boxes.items():
+        cols.setdefault(oid, tuple(int(c) for c in rng.integers(60, 255, 3)))
+        box(b, cols[oid], oid)
+    for g in kf.gripper:
+        if g.uv:
+            u, v = int(g.uv[1] * w / 1000), int(g.uv[0] * h / 1000)
+            col = (0, 255, 0) if g.open else (0, 0, 255)
+            cv2.circle(img, (u, v), 10, col, 3)
+            cv2.putText(img, f"{g.arm} {'open' if g.open else 'closed'}{' ' + g.held if g.held else ''}", (u + 14, v),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2, cv2.LINE_AA)
+    cv2.putText(img, f"t={kf.t:.2f}s", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+    return img
+
+
+def review_labels(video: str | Path, vu: VideoUnderstanding, argon: Argon, out_dir: Path,
+                  previous_id: str | None = None) -> VideoUnderstanding:
+    """PS2 loop on perception: render the labels onto the keyframes, let Argon check and correct them."""
+    from core.video_probe import read_frame
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for kf in vu.keyframes:
+        p = out_dir / f"labels_{kf.t:06.2f}.jpg"
+        cv2.imwrite(str(p), draw_labels(read_frame(video, kf.t), kf))
+        paths.append(p)
+    text = f"""Your labels, drawn on {len(paths)} keyframes (file names carry the time). Current JSON:
+{vu.model_dump_json()}
+
+{CONVENTIONS}
+
+Return the corrected VideoUnderstanding."""
+    try:
+        fixed, _ = argon.ask_json("label_review", REVIEW_SYSTEM, text, VideoUnderstanding, paths, model=ARGON,
+                                  thinking="high", previous_id=previous_id)
+    except Exception:  # noqa: BLE001 - keep the first-pass labels if the review fails
+        return vu
+    if {o.id for o in fixed.objects} != {o.id for o in vu.objects} or len(fixed.keyframes) != len(vu.keyframes):
+        return vu
+    for a, b in zip(fixed.keyframes, vu.keyframes):
+        a.t = b.t
+    return fixed
 
 
 def dense_labels(video: str | Path, times: list[float], vu: VideoUnderstanding, argon: Argon,
