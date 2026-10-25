@@ -1,0 +1,13 @@
+{"robot_id": "franka_panda", "menagerie_dir": "franka_emika_panda", "mjcf": "panda.xml",
+ "arms": [{"name": "arm",
+   "joints": ["joint1","joint2","joint3","joint4","joint5","joint6","joint7"],
+   "actuators": ["actuator1","actuator2","actuator3","actuator4","actuator5","actuator6","actuator7"],
+   "tcp": {"body": "hand", "pos": [0, 0, 0.1034], "quat": [1, 0, 0, 0]},
+   "closing_axis": "y",
+   "gripper": {"kind": "tendon_force", "actuator": "actuator8", "joints": ["finger_joint1","finger_joint2"],
+               "max_width_m": 0.08, "force_range": 140, "finger_force_per_ctrl": 0.5},
+   "home_qpos": [0.0, -0.3, 0.0, -2.2, 0.0, 1.9, 0.785],
+   "vel_limits": [2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61],
+   "robot_bodies": ["link0","link1","link2","link3","link4","link5","link6","link7","hand","left_finger","right_finger"],
+   "finger_bodies": ["left_finger","right_finger"]}],
+ "base_poses": [[0, 0, 0, 0]]}

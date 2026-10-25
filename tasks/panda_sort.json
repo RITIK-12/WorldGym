@@ -1,0 +1,13 @@
+{"name": "panda_sort", "robot": "franka_panda",
+ "objects": [
+  {"id": "cube", "shape": "box", "dims_m": [0.045, 0.045, 0.045], "colour": [0.85, 0.2, 0.15, 1], "xy": [0.42, -0.2], "yaw": 0.3, "mass": 0.08, "friction": 0.9},
+  {"id": "cyl", "shape": "cylinder", "dims_m": [0.045, 0.045, 0.08], "colour": [0.15, 0.4, 0.85, 1], "xy": [0.55, -0.12], "mass": 0.1, "friction": 0.9},
+  {"id": "barrier", "shape": "box", "dims_m": [0.22, 0.02, 0.09], "colour": [0.95, 0.75, 0.1, 1], "xy": [0.48, 0.03], "mass": 0.4, "friction": 0.8, "is_obstacle": true},
+  {"id": "bin", "shape": "container", "dims_m": [0.16, 0.16, 0.07], "colour": [0.3, 0.32, 0.36, 1], "xy": [0.48, 0.2], "is_fixed": true}
+ ],
+ "immutable_success_predicates": [
+  {"kind": "inside_container", "object_id": "cube", "target_id": "bin"},
+  {"kind": "inside_container", "object_id": "cyl", "target_id": "bin"},
+  {"kind": "max_obstacle_displacement", "object_id": "barrier", "limit": 0.01},
+  {"kind": "terminal_rest"}
+ ]}
