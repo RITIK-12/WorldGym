@@ -153,6 +153,14 @@ class SceneMirror:
                           "bytes": sum(s.vertices.nbytes + s.faces.nbytes for s in meshes)}
             self.update(d.xpos, d.xquat)
 
+    def clear(self) -> None:
+        """Nothing to show for this run yet: drop the previous run's scene instead of leaving it on screen."""
+        with self.lock, self.server.atomic():
+            for h in [*self.nodes.values(), *self.frames.values()]:
+                h.remove()
+            self.nodes, self.frames, self.body_frames, self.body_index = {}, {}, [], {}
+            self.model, self._last = None, None
+
     def update(self, xpos: np.ndarray, xquat: np.ndarray) -> None:
         with self.lock:
             pose = np.concatenate([xpos, xquat], 1)

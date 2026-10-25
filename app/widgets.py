@@ -27,7 +27,8 @@ def load_image(path: str | Path, max_w: int = MEDIA_W) -> np.ndarray | None:
 
 
 def big_number(number: str, label: str) -> str:
-    return (f'<div style="padding:2px 0 8px"><div style="font-size:56px;font-weight:700;line-height:1.05;color:{INK};'
+    size = 56 if len(number) <= 8 else 34
+    return (f'<div style="padding:2px 0 8px"><div style="font-size:{size}px;font-weight:700;line-height:1.05;color:{INK};'
             f'font-variant-numeric:tabular-nums">{html.escape(number)}</div>'
             f'<div style="font-size:13px;color:{INK2}">{html.escape(label)}</div></div>')
 

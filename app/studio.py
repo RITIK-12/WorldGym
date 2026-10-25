@@ -56,6 +56,7 @@ class Studio:
         self.live_sliders: dict[tuple[str, str], viser.GuiSliderHandle] = {}
         self.live_btn = self.live_md = self.live_draft = None
         self.contacts = None
+        self.framed = ""
         self.quiet = False
         self._build_gui()
         threading.Thread(target=self._player, daemon=True).start()
@@ -63,7 +64,9 @@ class Studio:
     # ------------------------------------------------------------------------------------------------------------------
     def _build_gui(self) -> None:
         gui = self.gui
-        gui.configure_theme(dark_mode=True, control_width="large", show_share_button=False, brand_color=(57, 135, 229))
+        gui.configure_theme(dark_mode=True, control_width="large", show_logo=False,
+                            show_share_button=False, brand_color=(57, 135, 229))
+        gui.main_panel.dock_right()
         nav = gui.add_panel()
         with nav.add_tab("WorldGym", viser.Icon.ROBOT):
             self.run_dd = gui.add_dropdown("Run", ("(no runs yet)",))
@@ -202,6 +205,7 @@ class Studio:
         with self.lock:
             if self.run_dir is None or name == NONE:
                 self.replay, self.replay_key = None, ""
+                self.mirror.clear()
                 self.replay_md.content = "no replayable draft in this run yet"
                 return
             key = self._replay_key(name)
@@ -221,9 +225,24 @@ class Studio:
                 self.replay_md.content = f"replay unavailable: {type(e).__name__}: {e}"
                 return
             self.replay = rep
+            if self.framed != str(self.run_dir):
+                self.framed = str(self.run_dir)
+                self.frame_camera(rep)
             self.t_slider.value = 0.0
             self.t_slider.max = max(float(rep.t[-1]), 1.0 / FPS)
             self.show_frame(0.0)
+
+    def frame_camera(self, rep: Replay) -> None:
+        """Point every client at this run's scene (a Panda cell and a bimanual table sit in different places)."""
+        p = rep.xpos[0][1:]
+        lo, hi = p.min(0), p.max(0)
+        look = (lo + hi) / 2
+        look[2] = max(lo[2], FLOOR_Z) + 0.1
+        r = max(float(np.max(hi - lo)) / 2, 0.5)
+        pos = look + np.array([0.62, -0.62, 0.48]) * 3.4 * r
+        self.server.initial_camera.position, self.server.initial_camera.look_at = tuple(pos), tuple(look)
+        for c in self.server.get_clients().values():
+            c.camera.position, c.camera.look_at = tuple(pos), tuple(look)
 
     def show_frame(self, t: float) -> None:
         rep = self.replay
@@ -562,7 +581,8 @@ def main() -> None:
     @server.on_client_connect
     def _(client: viser.ClientHandle) -> None:
         client.camera.up_direction = (0.0, 0.0, 1.0)
-        client.camera.position, client.camera.look_at = CAM_POS, CAM_LOOK
+        client.camera.position = server.initial_camera.position
+        client.camera.look_at = server.initial_camera.look_at
 
     server.scene.set_up_direction("+z")
     studio = Studio(server)

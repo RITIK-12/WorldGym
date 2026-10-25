@@ -193,7 +193,8 @@ def _step_input(d: Path, m: RunManifest) -> Step:
         return Step(1, TITLES[0], False, f"{video}{prompt} — video QA is {qa.status if qa else 'not started'}.",
                     DASH, "QA verdict", media)
     accepted = bool(qa.data.get("accepted", qa.status == "ok"))
-    verdict = "accepted" if accepted and qa.status == "ok" else ("refused" if qa.status == "refused" else qa.status)
+    verdict = ("accepted" if accepted and qa.status == "ok" else "moving camera" if qa.status == "ok"
+               else "refused" if qa.status == "refused" else qa.status)
     reason = f" ({qa.error})" if qa.status in ("refused", "failed") and qa.error else ""
     return Step(1, TITLES[0], True, f"{video}{prompt} — QA: {qa.headline or verdict}{reason}.", verdict,
                 "QA verdict on the clip", media, extra={"keyframes_t": qa.data.get("keyframes_t", [])})

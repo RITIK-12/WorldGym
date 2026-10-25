@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "studio",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["-m", "app.studio", "--port", "8080"],
+      "port": 8080
+    }
+  ]
+}
