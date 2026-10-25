@@ -87,10 +87,13 @@ predicates of the task). Geometry is measured, so keep the measured xy unless an
 use the measured footprint extents and yaw for box-like objects; choose heights from the video (the robot is the
 scale reference). You decide each object's role: manipulated objects are free; containers are open boxes
 (shape "container", is_fixed true, dims = OUTER size, wall_m ~0.005-0.01); things the robot must avoid are
-obstacles (is_obstacle true). Use shape "composite" with parts when one primitive is a bad fit (e.g. a handle on two
+obstacles (is_obstacle true); objects that stay put in the video while being held, pressed or wiped (a bolted bar,
+a fixture) are is_fixed true. Use shape "composite" with parts when one primitive is a bad fit (e.g. a handle on two
 blocks, an L-bracket). Predicates must be checkable at the END of the episode: inside_container(object, target),
 on_top_of(object, target), max_obstacle_displacement(object, limit metres), pushed_to_region(object, region
-[xmin, ymin, xmax, ymax]), terminal_rest. Frame: metres, table top z = 0, robot base at the origin, +x away from the
+[xmin, ymin, xmax, ymax]), wiped_coverage(object = the wiper, target = the wiped object, limit = required fraction of
+the wiped length, region = optional [s_min, s_max] metres along the target's long axis from its centre),
+terminal_rest. Frame: metres, table top z = 0, robot base at the origin, +x away from the
 robot, +y to the robot's left, yaw radians about +z, dims_m FULL extents [x, y, z] in the object frame (cylinder:
 [diameter, diameter, height]). Colours are RGBA in 0..1."""
 

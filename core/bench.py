@@ -51,6 +51,8 @@ def failure_labels(summary: dict) -> list[str]:
             labels.add("MISSED_CONTAINER" if not p.get("in_xy") or not p.get("bottom_ok") else "TIPPED_IN_CONTAINER")
         elif p["kind"] == "max_obstacle_displacement" and not p["ok"]:
             labels.add("BARRIER_COLLISION")
+        elif p["kind"] == "wiped_coverage" and not p["ok"]:
+            labels.add("WIPE_INCOMPLETE")
         elif p["kind"] == "terminal_rest" and not p["ok"]:
             labels.add("NOT_AT_REST")
         elif p["kind"] == "on_top_of" and not p["ok"]:

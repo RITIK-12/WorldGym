@@ -58,6 +58,8 @@ def default_family(task: TaskSpec, harder: bool = False) -> Family:
             h = o.dims_m[2]
             objs[o.id] = ObjRange(xy_jitter_m=[0.02 * k, 0.02 * k], yaw_jitter_rad=0.2 * k,
                                   height_m=[h * 1.55, h * 2.0] if harder else [h * 0.7, h * 1.5])
+        elif o.is_fixed:   # fixtures (e.g. a wiped bar): small pose changes
+            objs[o.id] = ObjRange(xy_jitter_m=[0.02 * k, 0.02 * k], yaw_jitter_rad=0.08 * k)
         elif not o.is_fixed:
             objs[o.id] = ObjRange(xy_jitter_m=[0.05 * k, 0.05 * k], yaw_jitter_rad=math.pi,
                                   scale=[1.1, 1.25] if harder else [0.85, 1.15], mass_scale=[0.7, 1.4],

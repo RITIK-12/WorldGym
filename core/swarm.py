@@ -36,12 +36,14 @@ HYPOTHESES = {
     "container_fit": "Smaller or yawed containers and larger objects versus the place pose, opening and yaw.",
     "grasp_seating": "Object size, yaw, mass and friction versus grasp depth, force and finger opening.",
     "reach_limits": "Objects and containers near the workspace edges versus reach, yaw and joint limits.",
+    "wipe_contact": "Wiped target pose and height versus press depth, stroke span, wiper size and arm clearance.",
 }
 CLUSTER_TO_HYPOTHESIS = {"BARRIER_COLLISION": "barrier_clearance", "RIM_STRIKE_WHILE_HELD": "container_fit",
                          "MISSED_CONTAINER": "container_fit", "TIPPED_IN_CONTAINER": "container_fit",
                          "GRASP_FAILURE": "grasp_seating", "KNOCKED_OTHER_OBJECT": "grasp_seating",
                          "MOTION_BLOCKED": "reach_limits", "IK_REACH_LIMIT": "reach_limits",
-                         "NOT_AT_REST": "container_fit", "MISSED_SUPPORT": "container_fit"}
+                         "NOT_AT_REST": "container_fit", "MISSED_SUPPORT": "container_fit",
+                         "WIPE_INCOMPLETE": "wipe_contact", "ARM_ARM_COLLISION": "reach_limits"}
 
 
 class FailingScenario(BaseModel):

@@ -39,8 +39,12 @@ def _first_grasp(ep: Episode) -> float:
     return float(ep.arrays["t"][idx[0]]) if len(idx) else 0.0
 
 
-def side_by_side(video: str, task: TaskSpec, ep: Episode, video_grasp_t: float, out: Path, label: str) -> Path:
-    """Real (left) | sim replay from the solved video camera (right), at FPS, aligned at the first grasp."""
+def side_by_side(video: str, task: TaskSpec, ep: Episode, video_grasp_t: float, out: Path, label: str,
+                 cam_at=None) -> Path:
+    """Real (left) | sim replay from the solved video camera (right), at FPS, aligned at the first grasp.
+    cam_at(t) -> tracked camera for a moving camera."""
+    from core.camera_solve import set_camera
+
     sim = build_sim(task)
     m, d = sim.m, sim.d
     cam = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, "video")
@@ -63,6 +67,9 @@ def side_by_side(video: str, task: TaskSpec, ep: Episode, video_grasp_t: float, 
             real = cv2.resize(fr, (PANEL_W, vh)) if ok else np.zeros((vh, PANEL_W, 3), np.uint8)
             k = int(np.clip(np.searchsorted(t_sim, t - offset), 0, len(t_sim) - 1))
             d.qpos[:] = qpos[k]
+            c = cam_at(t) if cam_at else None
+            if c is not None:
+                set_camera(m, d, "video", c["pos"], c["xyaxes"], c["fovy"])
             mujoco.mj_kinematics(m, d)
             mujoco.mj_camlight(m, d)
             r.update_scene(d, camera=cam)
@@ -85,7 +92,7 @@ def _score(ep: Episode, end_err: float | None) -> tuple:
 
 def run_replay_critic(video: str, task: TaskSpec, draft: PolicyConfig, adapter: RobotAdapter, argon: Argon,
                       video_grasp_t: float, motion_log: dict, end_error, out_dir: Path, max_iters: int = 2,
-                      good_enough_mm: float = 15.0) -> dict:
+                      good_enough_mm: float = 15.0, cam_at=None) -> dict:
     """end_error(ep) -> mean end-pose error in mm (or None). Returns the best draft and the critique history."""
     out_dir.mkdir(parents=True, exist_ok=True)
     ep = run_episode(task, draft)
@@ -94,7 +101,7 @@ def run_replay_critic(video: str, task: TaskSpec, draft: PolicyConfig, adapter: 
     history, prev_id = [], None
     for it in range(1, max_iters + 1):
         clip = side_by_side(video, task, best[1], video_grasp_t, out_dir / f"side_by_side_iter{it}.mp4",
-                            best[0].name)
+                            best[0].name, cam_at)
         s = best[1].summary()
         prompt = f"""{robot_facts(adapter)}
 
@@ -128,6 +135,7 @@ The attached side-by-side video is iteration {it}. Return the patch (from_iterat
             best = (cand, ep2, err2)
         if best[1].success and best[2] is not None and best[2] <= good_enough_mm:
             break
-    final_clip = side_by_side(video, task, best[1], video_grasp_t, out_dir / "side_by_side_final.mp4", best[0].name)
+    final_clip = side_by_side(video, task, best[1], video_grasp_t, out_dir / "side_by_side_final.mp4", best[0].name,
+                              cam_at)
     return {"draft": best[0], "episode": best[1], "end_pose_err_mm": best[2], "history": history,
             "video": str(final_clip), "start": {"success": ep.success, "end_pose_err_mm": err}}

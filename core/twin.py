@@ -1,8 +1,13 @@
 """Twin half of the pipeline: video -> verified MuJoCo twin + Draft 1, one run-registry stage per step.
 
-qa -> video_architect -> robot_onboard -> camera_solve -> loop1_static (Scene Author + Twin Critic loop)
-   -> motion_extract (parallel Robotics-ER labellers -> contact-constrained waypoints -> Draft 1 -> dynamic fidelity)
-   -> replay_critic (Argon watches real | sim side by side and patches Draft 1 toward the demonstration)
+qa (static, or moving-camera mode for handheld clips)
+ -> video_architect (Argon on the clip + keyframes, then Argon reviews its own labels)
+ -> robot_onboard (Argon picks the robot by comparing rendered Menagerie candidates; adapter + self-test)
+ -> camera_solve (Robotics-ER boxes per arm -> robot mask -> silhouette solve at a rest frame; moving camera: tracked
+    through the clip on the table plane)
+ -> loop1_static (Scene Author + Twin Critic loop on the 4-view matrix)
+ -> motion_extract (parallel Robotics-ER labellers -> per-arm hold / wipe / pick-place segments -> Draft 1)
+ -> replay_critic (Argon watches real | sim side by side and patches Draft 1 toward the demonstration)
 """
 from __future__ import annotations
 
@@ -11,22 +16,36 @@ from pathlib import Path
 import cv2
 import mujoco
 import numpy as np
+from pydantic import BaseModel
 
-from core.argon import Argon
-from core.camera_solve import add_video_camera, apply_solution, render_body_mask, solve_camera
+from core.argon import ROBOTICS_ER, Argon
+from core.camera_solve import add_video_camera, apply_solution, render_body_mask, set_camera, solve_camera
+from core.camera_track import camera_at, track_camera, track_overlay
 from core.fidelity import measure_footprint, run_loop1
-from core.motion_extract import extract
+from core.mjcf_compiler import ROBOTS, scene_table
+from core.motion_extract import extract, extract_multi
 from core.replay_critic import run_replay_critic
-from core.robot_onboard import onboard
+from core.robot_onboard import onboard, self_test, verify_robot
 from core.rollout import build_sim, run_episode
 from core.runs import Refused, Run
 from core.scene_build import author_scene, fallback_scene, make_task, mask_overlay, measure_objects
-from core.schemas import TaskSpec, VideoUnderstanding
+from core.schemas import RobotAdapter, TaskSpec, VideoUnderstanding
 from core.segment import grabcut_mask, masks_from_boxes, norm_box_to_px
 from core.video_architect import dense_labels, understand
 from core.video_probe import probe, read_frame
 
 WORK_W = 1280
+LABEL_DT = 0.25
+
+
+class ArmBox(BaseModel):
+    name: str
+    box: list[float]
+
+
+class CalibBoxes(BaseModel):
+    robot_arms: list[ArmBox]
+    objects: dict[str, list[float]] = {}
 
 
 def _frame(video: str, t: float) -> np.ndarray:
@@ -34,10 +53,6 @@ def _frame(video: str, t: float) -> np.ndarray:
     if f.shape[1] > WORK_W:
         f = cv2.resize(f, (WORK_W, round(f.shape[0] * WORK_W / f.shape[1])), interpolation=cv2.INTER_AREA)
     return f
-
-
-def _nearest_kf(vu: VideoUnderstanding, t: float):
-    return min(vu.keyframes, key=lambda k: abs(k.t - t)) if vu.keyframes else None
 
 
 def _fit_overlay(frame, real_mask, sim_mask, path: Path) -> str:
@@ -49,13 +64,44 @@ def _fit_overlay(frame, real_mask, sim_mask, path: Path) -> str:
     return str(path)
 
 
+def find_adapter(menagerie_dir: str, n_arms: int) -> RobotAdapter | None:
+    for p in sorted(ROBOTS.glob("*.json")):
+        a = RobotAdapter.model_validate_json(p.read_text())
+        if a.menagerie_dir == menagerie_dir and len(a.arms) == n_arms:
+            return a
+    return None
+
+
+def posed_sim(task: TaskSpec, adapter: RobotAdapter, pose: str):
+    sim = build_sim(task, adapter)
+    for arm in adapter.arms:
+        sim.ctrls[arm.name].set_joints(arm.home_qpos if pose == "home" else (arm.rest_qpos or arm.home_qpos))
+    mujoco.mj_forward(sim.m, sim.d)
+    return sim
+
+
+def calib_boxes(argon: Argon, frame_path: Path, vu: VideoUnderstanding, n_arms: int, tag: str) -> CalibBoxes:
+    arms = "the robot arm" if n_arms == 1 else "each robot arm separately (name them by side: left, right)"
+    ids = ", ".join(o.id for o in vu.objects)
+    boxes, _ = argon.ask_json(
+        f"calib_boxes_{tag}", "Precise spatial labeller for robot scenes.",
+        f"Give tight boxes [ymin, xmin, ymax, xmax] (0..1000 of the image) for {arms} - every visible part from where "
+        f"it enters the frame to its gripper - and for each of these objects that is visible: {ids}. Use exactly "
+        "these object ids.", CalibBoxes, [frame_path], model=ROBOTICS_ER, thinking="high", max_output_tokens=8192)
+    return boxes
+
+
 def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = False) -> dict:
     with run.stage("qa") as s:
         pr = probe(video, run.path("qa"))
+        moving = not pr["accepted"] and pr.get("moving_camera_ok", False)
         s.headline = pr["headline"] + ("" if pr["accepted"] else " · " + "; ".join(pr["reasons"]))
+        if moving:
+            s.headline += " → moving-camera mode"
         s.data = {k: v for k, v in pr.items() if k != "curve"}
+        s.data["moving_camera"] = moving
         s.artifacts += ["qa/probe.json", "qa/motion.png"]
-        if not pr["accepted"] and not force:
+        if not pr["accepted"] and not moving and not force:
             raise Refused("; ".join(pr["reasons"]))
 
     with run.stage("video_architect") as s:
@@ -66,53 +112,117 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
                   "phases": [p.model_dump() for p in vu.phases], "success_intent": vu.success_intent}
         s.artifacts.append("architect/vu.json")
 
+    active = [p for p in vu.phases if p.action != "idle"]
+    t_act0 = min((p.t0 for p in active), default=0.0)
+    t_act1 = max((p.t1 for p in active), default=float(pr["duration_s"]))
+    n_arms = max(1, vu.robot.arms)
+
     with run.stage("robot_onboard") as s:
-        if vu.robot.arms != 1:
-            raise Refused(f"{vu.robot.arms}-arm robots are not supported by this build yet (single-arm tier)")
-        ob = onboard(vu.robot.menagerie_dir or "franka_emika_panda", argon, log_dir=run.path("onboard"))
-        adapter = ob["adapter"]
-        n_ok = sum(c["ok"] for c in ob["self_test"]["checks"].values())
-        s.headline = f"{adapter.robot_id} ({ob['source']}) · self-test {n_ok}/{len(ob['self_test']['checks'])}"
-        s.data = {"self_test": ob["self_test"], "source": ob["source"]}
-        if not ob["self_test"]["ok"]:
-            raise RuntimeError(f"robot self-test failed: {ob['self_test']['checks']}")
+        mid = (t_act0 + t_act1) / 2
+        fpath = run.path("onboard/real_frame.jpg")
+        cv2.imwrite(str(fpath), _frame(video, mid))
+        guess = vu.robot.menagerie_dir or "franka_emika_panda"
+        try:
+            pick = verify_robot(argon, fpath, guess, run.path("onboard"))
+            mdir = pick.menagerie_dir
+            s.data["verify"] = pick.model_dump()
+        except Exception as e:  # noqa: BLE001 - keep the first-pass guess if the check fails
+            mdir = guess
+            s.data["verify_error"] = str(e)[:300]
+        adapter = find_adapter(mdir, n_arms)
+        source = f"robots/{adapter.robot_id}.json" if adapter else None
+        if adapter is None and n_arms == 1:
+            ob = onboard(mdir, argon, log_dir=run.path("onboard"))
+            adapter, source = ob["adapter"], ob["source"]
+        if adapter is None:
+            raise Refused(f"no {n_arms}-arm adapter for {mdir}")
+        st = self_test(adapter)
+        n_ok = sum(c["ok"] for c in st["checks"].values())
+        changed = mdir != guess
+        s.headline = (f"{adapter.robot_id}" + (f" (Argon corrected {guess} → {mdir} by comparing renders)" if changed
+                                              else "") + f" · self-test {n_ok}/{len(st['checks'])}")
+        s.data.update(self_test=st, source=source, adapter=adapter.robot_id)
+        s.artifacts += ["onboard/real_frame.jpg", "onboard/candidates.jpg"]
+        if not st["ok"]:
+            raise RuntimeError(f"robot self-test failed: { {k: v['ok'] for k, v in st['checks'].items()} }")
 
     with run.stage("camera_solve") as s:
-        rest = _frame(video, vu.rest_frame_t)
-        h, w = rest.shape[:2]
-        kf = _nearest_kf(vu, vu.rest_frame_t)
-        if kf is None or not kf.robot_box:
-            raise RuntimeError("no robot box near the rest frame")
-        robot_mask = grabcut_mask(rest, norm_box_to_px(kf.robot_box, w, h))
-        base = add_video_camera(TaskSpec(name=run.run_id, robot=adapter.robot_id, objects=[]), w, h)
-        sim = build_sim(base, adapter)
-        init = {k: v for k, v in (vu.camera_guess or {}).items()}
-        sol = solve_camera(sim.m, sim.d, robot_mask, sim.ix.robot_bodies, "video", init=init)
-        cam_task = apply_solution(base, sol, w, h)
-        cv2.imwrite(str(run.path("camera/rest_frame.jpg")), rest)
-        sim_mask = render_body_mask(sim.m, sim.d, "video", sim.ix.robot_bodies, w, h)
-        art = _fit_overlay(rest, robot_mask, sim_mask, run.path("camera/robot_fit.jpg"))
-        s.headline = f"robot silhouette IoU {sol['iou']:.2f} · fovy {sol['fovy']:.0f}°"
-        s.data = {k: v for k, v in sol.items() if k in ("pos", "xyaxes", "fovy", "params", "iou", "accepted",
-                                                         "seconds")}
+        cands = sorted({round(min((k.t for k in vu.keyframes), default=0.0), 2), round(vu.rest_frame_t, 2)})
+        best = None
+        for t in cands:
+            frame = _frame(video, t)
+            h, w = frame.shape[:2]
+            fp = run.path(f"camera/frame_{t:06.2f}.jpg")
+            cv2.imwrite(str(fp), frame)
+            try:
+                boxes = calib_boxes(argon, fp, vu, n_arms, f"{t:06.2f}")
+                arm_boxes = [b.box for b in boxes.robot_arms]
+                obj_boxes = boxes.objects
+            except Exception:  # noqa: BLE001 - fall back to the architect's keyframe labels
+                kf = min(vu.keyframes, key=lambda k: abs(k.t - t))
+                arm_boxes, obj_boxes = ([kf.robot_box] if kf.robot_box else []), kf.object_boxes
+            if not arm_boxes:
+                continue
+            mask = np.zeros((h, w), bool)
+            for b in arm_boxes:
+                mask |= grabcut_mask(frame, norm_box_to_px(b, w, h))
+            base = add_video_camera(TaskSpec(name=run.run_id, robot=adapter.robot_id, objects=[]), w, h)
+            fwd = float(np.mean([bp[2] for bp in (adapter.build or {}).get("arms", {}).values()] or [0.0]))
+            init = dict(vu.camera_guess or {})
+            if "azimuth_deg" in init:   # the architect measures azimuth from the robot's forward direction
+                init["azimuth_deg"] = init["azimuth_deg"] + float(np.degrees(fwd))
+            for pose in ("rest", "home"):
+                sim = posed_sim(base, adapter, pose)
+                sol = solve_camera(sim.m, sim.d, mask, sim.ix.robot_bodies, "video", init=init)
+                if best is None or sol["iou"] > best["sol"]["iou"]:
+                    best = {"t": t, "pose": pose, "sol": sol, "mask": mask, "frame": frame, "base": base,
+                            "obj_boxes": obj_boxes, "sim": sim}
+        if best is None:
+            raise RuntimeError("no robot boxes to calibrate the camera")
+        sol, frame, t_ref = best["sol"], best["frame"], best["t"]
+        h, w = frame.shape[:2]
+        cam_task = apply_solution(best["base"], sol, w, h)
+        cv2.imwrite(str(run.path("camera/rest_frame.jpg")), frame)
+        sim_mask = render_body_mask(best["sim"].m, best["sim"].d, "video", best["sim"].ix.robot_bodies, w, h)
+        art = _fit_overlay(frame, best["mask"], sim_mask, run.path("camera/robot_fit.jpg"))
         s.artifacts += ["camera/rest_frame.jpg", run.rel(art)]
-        if not sol["accepted"]:
-            raise RuntimeError(f"camera solve rejected: silhouette IoU {sol['iou']:.2f} < 0.75")
+        track = None
+        if moving:
+            times = sorted({round(t, 2) for t in np.arange(t_act0, t_act1 + 1e-6, LABEL_DT)}
+                           | {round(k.t, 2) for k in vu.keyframes})
+            tb = scene_table(cam_task, adapter)
+            rect = (*tb.center_xy, *tb.size_xy)
+            track = track_camera(video, t_ref, sol["pos"], sol["xyaxes"], sol["fovy"], times, table_rect=rect)
+            run.write_json("camera/track.json", track)
+            for tt in (t_act0, (t_act0 + t_act1) / 2, t_act1):
+                c = camera_at(track, tt)
+                if c:
+                    p = track_overlay(video, c, tt, run.path(f"camera/track_{tt:06.2f}.jpg"), rect)
+                    s.artifacts.append(run.rel(p))
+            s.data["tracked"] = f"{sum(c['ok'] for c in track)}/{len(track)}"
+        s.headline = (f"robot silhouette IoU {sol['iou']:.2f} · fovy {sol['fovy']:.0f}° · rest pose '{best['pose']}'"
+                      + (f" · tracked {s.data['tracked']} frames" if track else ""))
+        s.data.update({k: v for k, v in sol.items() if k in ("pos", "xyaxes", "fovy", "params", "iou", "accepted",
+                                                             "seconds")}, ref_t=t_ref, pose=best["pose"])
+        if sol["iou"] < 0.6:
+            raise RuntimeError(f"camera solve rejected: silhouette IoU {sol['iou']:.2f} < 0.6")
+    cam_at = (lambda t: camera_at(track, t)) if track else None
+    pose = best["pose"]
 
     with run.stage("loop1_static") as s:
-        boxes = {oid: b for oid, b in (kf.object_boxes or {}).items()}
-        masks = masks_from_boxes(rest, boxes)
-        sim = build_sim(cam_task, adapter)
+        masks = masks_from_boxes(frame, best["obj_boxes"])
+        sim = posed_sim(cam_task, adapter, pose)
         measured = measure_objects(sim.ix, sim.d, vu, masks)
-        overlay = mask_overlay(rest, masks, run.path("loop1/masks.jpg"))
+        overlay = mask_overlay(frame, masks, run.path("loop1/masks.jpg"))
         try:
             draft = author_scene(argon, vu, measured, run.path("camera/rest_frame.jpg"), overlay, prompt)
         except Exception as e:  # noqa: BLE001 - the twin must still be built from the measurements
             draft = fallback_scene(vu, measured)
             s.data["author_error"] = str(e)[:300]
         task = make_task(run.run_id.split("_", 1)[-1] or "twin", adapter.robot_id, draft, cam_task, vu)
-        context = f"Task: {vu.success_intent}. Robot: {vu.robot.make_model_guess}."
-        res = run_loop1(task, rest, masks, run.path("loop1"), argon=argon, context=context, robot_mask=robot_mask)
+        context = f"Task: {vu.success_intent}. Robot: {adapter.robot_id} ({n_arms} arm(s))."
+        res = run_loop1(task, frame, masks, run.path("loop1"), argon=argon, context=context,
+                        robot_mask=best["mask"], build=lambda t: posed_sim(t, adapter, pose))
         task = res["task"]
         run.write_json("loop1/task.json", task.model_dump())
         start = res["history"][0]["alignment"]
@@ -124,23 +234,24 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
                         run.rel(res["final_views"]["matrix"])]
 
     with run.stage("motion_extract") as s:
-        active = [p for p in vu.phases if p.action not in ("idle",)]
-        t0 = min((p.t0 for p in active), default=0.0)
-        t1 = max((p.t1 for p in active), default=float(pr["duration_s"]))
-        times = [round(t, 2) for t in np.arange(t0, t1 + 1e-6, 0.25)][:96]
+        times = [round(t, 2) for t in np.arange(t_act0, t_act1 + 1e-6, LABEL_DT)][:160]
         labels = dense_labels(video, times, vu, argon, run.path("motion"))
         run.write_json("motion/labels.json", [k.model_dump() for k in labels])
         sim = build_sim(task, adapter)
-        draft1, log = extract(task, labels, sim, w, h)
+        if n_arms > 1 or moving:
+            draft1, log = extract_multi(task, labels, sim, w, h, cam_at)
+        else:
+            draft1, log = extract(task, labels, sim, w, h)
         if not draft1.primitives:
             raise RuntimeError("no grasp -> release segment found in the labels")
         run.write_json("motion/motion_extract.json", log)
         run.write_json("motion/draft1.json", draft1.model_dump())
-        ep = run_episode(task, draft1)
-        real_end = real_end_positions(video, task, labels)
+        ep = run_episode(task, draft1, adapter)
+        real_end = real_end_positions(video, task, labels, cam_at)
         err, per = end_pose_error(task, ep, real_end)
         dyn = {"replay_success": ep.success, "end_pose_err_mm": err, "per_object_mm": per, "real_end_xy": real_end}
-        s.headline = (f"Draft 1 from {len(labels)} labelled frames · replay "
+        kinds = ", ".join(f"{p.arm}:{p.kind}" for p in draft1.primitives)
+        s.headline = (f"Draft 1 [{kinds}] from {len(labels)} labelled frames · replay "
                       f"{'succeeds' if ep.success else 'fails'}"
                       + (f" · end error {err:.0f} mm" if err is not None else ""))
         s.data = {"segments": log["segments"], "dynamic": dyn, "n_labels": len(labels)}
@@ -149,7 +260,8 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
     with run.stage("replay_critic") as s:
         grasp_t = log["segments"][0]["grasp_t"]
         rc = run_replay_critic(video, task, draft1, adapter, argon, grasp_t, log,
-                               lambda e: end_pose_error(task, e, real_end)[0], run.path("replay_critic"))
+                               lambda e: end_pose_error(task, e, real_end)[0], run.path("replay_critic"),
+                               cam_at=cam_at)
         draft1 = rc["draft"].model_copy(update={"name": "draft1"})
         run.write_json("motion/draft1.json", draft1.model_dump())
         dyn = {**dyn, "replay_success": rc["episode"].success, "end_pose_err_mm": rc["end_pose_err_mm"],
@@ -162,7 +274,7 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
     return {"task": task, "draft1": draft1, "adapter": adapter, "dynamic_ref": dyn, "vu": vu}
 
 
-def real_end_positions(video: str, task: TaskSpec, labels) -> dict[str, list[float]]:
+def real_end_positions(video: str, task: TaskSpec, labels, cam_at=None) -> dict[str, list[float]]:
     """Table positions of the moved objects in the last labelled frame (metric footprints)."""
     last = max((k for k in labels if k.object_boxes), key=lambda k: k.t, default=None)
     if last is None:
@@ -170,11 +282,14 @@ def real_end_positions(video: str, task: TaskSpec, labels) -> dict[str, list[flo
     frame = _frame(video, last.t)
     masks = masks_from_boxes(frame, last.object_boxes)
     sim = build_sim(task.model_copy(update={"objects": []}))
-    moved = {p.object_id for p in task.immutable_success_predicates if p.target_id} or \
+    c = cam_at(last.t) if cam_at else None
+    if c is not None:
+        set_camera(sim.m, sim.d, "video", c["pos"], c["xyaxes"], c["fovy"])
+    moved = {p.object_id for p in task.immutable_success_predicates if p.target_id or p.kind == "pushed_to_region"} or \
             {o.id for o in task.objects if not o.is_fixed and not o.is_obstacle}
     out = {}
     for o in task.objects:
-        if o.id in moved and o.id in masks:
+        if o.id in moved and o.id in masks and not o.is_fixed:
             fp = measure_footprint(sim.ix, sim.d, "video", masks[o.id], max(o.dims_m[2], 0.02))
             if fp:
                 out[o.id] = fp["xy"]

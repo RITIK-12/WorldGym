@@ -33,6 +33,13 @@ Fields of a primitive (numbers in metres / radians / newtons / m/s):
 - release_drop_height_m: object bottom height above the target floor at release
 - retract_z_m: TCP z after releasing; speed_mps (0.35): descend/lower x0.45, lift x0.7
 
+Primitive kinds: "pick_place" (above), "hold" (grasp object_id and keep holding it until every other arm is done;
+hold_lift_m lifts it), "wipe" (grasp object_id = the wiper, press it onto target_id's top and stroke along the
+target's long axis between wipe_start_m and wipe_end_m (metres from the target centre), wipe_strokes passes at
+wipe_speed_mps, wiper bottom wipe_press_m below the surface top (wipe_surface_z_m overrides the top), offset
+wipe_lateral_m across the axis; place_back returns the wiper to where it was picked). sync_after = an arm name: start
+only once that arm is holding (or idle). Two arms colliding is reported as ARM_ARM_COLLISION.
+
 Any numeric field may instead be a state-conditioned value {"terms": [feature, ...], "offset": x} = sum of the
 features measured when the action starts + offset. Features: """ + ", ".join(FEATURES) + """.
 - obj_top_z / obj_height: the primitive's object; held_below_tcp: how far the held object hangs below the TCP
