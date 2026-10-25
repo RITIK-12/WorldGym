@@ -296,6 +296,8 @@ def run_loop1(task: TaskSpec, real_bgr: np.ndarray, real_masks: dict[str, np.nda
                     break
             except ScenePatchError as e:
                 rec["critic_error"] = str(e)
+            except Exception as e:  # noqa: BLE001 - a failed critique never loses the measured twin
+                rec["critic_error"] = f"{type(e).__name__}: {str(e)[:300]}"
         rec["task"] = task.model_dump()
         history.append(rec)
         if met["alignment"] >= target and argon is None:

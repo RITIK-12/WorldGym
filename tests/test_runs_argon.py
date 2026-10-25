@@ -125,3 +125,28 @@ def test_repeat_guard_and_ledger(tmp_path, monkeypatch):
         a.check_budget("model", "loop")
     a.record_spend("model", "x", a.ARGON, {"total_input_tokens": 1000, "total_output_tokens": 500}, True)
     assert a.spend_summary()["usd_est_today"] == pytest.approx(0.007)
+
+
+def test_retry_on_malformed_json_400(tmp_path, monkeypatch):
+    import core.argon as a
+    monkeypatch.setattr(a, "STATE", tmp_path / "state")
+    calls = []
+
+    class FakeIt:
+        status, id, output_text, usage = "completed", "i1", '{"a": 1, "b": "ok"}', None
+
+    class FakeInteractions:
+        def create(self, **kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                raise RuntimeError("Error code: 400 - Model generated invalid JSON syntax. Please retry the request.")
+            return FakeIt()
+
+    class FakeClient:
+        interactions = FakeInteractions()
+
+    ar = Argon(tmp_path / "b", backend="gemini")
+    ar._client = FakeClient()
+    obj, _ = ar.ask_json("t", "s", "p", Thing, previous_id="prev")
+    assert obj.a == 1 and len(calls) == 2
+    assert "previous attempt failed" in calls[1]["input"][-1]["text"]

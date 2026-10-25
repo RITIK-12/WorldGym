@@ -49,6 +49,7 @@ POLL_S = 3.0
 TIMEOUT_S = 20 * 60
 DEFAULT_MAX_OUTPUT = 65536
 USD_PER_M_IN, USD_PER_M_OUT = 2.0, 10.0
+RETRYABLE = ("invalid json", "malformed", "please retry", "internal error", "unavailable", "deadline")
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -283,7 +284,19 @@ class Argon:
             kw["previous_interaction_id"] = previous_id
         # JSON is enforced by the prompt contract + pydantic validation (+ one re-ask); the server requires a full
         # response_format schema whenever response_mime_type is set, which pydantic schemas do not always satisfy.
-        it = self._create(name, model, kw)
+        for attempt in range(3):
+            try:
+                it = self._create(name, model, kw)
+                break
+            except Exception as e:  # noqa: BLE001
+                msg = str(e)
+                if attempt == 2 or not any(k in msg.lower() for k in RETRYABLE):
+                    raise
+                # the server asks for the error to be included in the retry prompt
+                kw["input"] = [*kw["input"], {"type": "text", "text": f"\n\nThe previous attempt failed with: "
+                                              f"{msg[:400]}\nReply with ONE valid JSON object as plain text."}]
+                if attempt == 1:
+                    kw.pop("previous_interaction_id", None)  # last resort: a fresh turn
         t0 = time.time()
         while it.status in ("in_progress", "queued"):
             if time.time() - t0 > TIMEOUT_S:
