@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 from pydantic import BaseModel
 
-from core.argon import ARGON, Argon, parse_json
+from core.argon import ARGON, Argon, check_budget, parse_json, record_spend
 from core.bench import aggregate, run_suite
 from core.critic import DSL_DOC, apply_patch, robot_facts
 from core.perturb import Family, ObjRange, Scenario, apply_overrides, layout_ok, sample_overrides
@@ -27,6 +27,7 @@ REPO = Path(__file__).resolve().parents[1]
 AGENT = os.environ.get("WORLDGYM_AGENT", "antigravity-preview-09-2026")
 POLL_S = 10.0
 BUDGET = 24
+AGENT_MAX_TOKENS = int(os.environ.get("WORLDGYM_AGENT_MAX_TOKENS", 400_000))  # per-agent spend cap
 ALLOWLIST = ["github.com", "*.github.com", "*.githubusercontent.com", "pypi.org", "files.pythonhosted.org",
              "astral.sh", "*.astral.sh"]
 
@@ -230,11 +231,19 @@ def launch_agents(task: TaskSpec, task_path: str, policy: PolicyConfig, fam: Fam
     for h in hypotheses:
         prompt = agent_prompt(h, task_path, fam)
         (log_dir / f"agent_{h}_prompt.md").write_text(prompt)
-        it = client.interactions.create(agent=AGENT, agent_config={"type": "antigravity", "model": ARGON},
+        check_budget("agent")
+        it = client.interactions.create(agent=AGENT, agent_config={"type": "antigravity", "model": ARGON,
+                                                                   "max_total_tokens": AGENT_MAX_TOKENS},
                                         input=prompt, environment=env, background=True)
+        record_spend("agent", f"swarm_{h}", AGENT, None, True, it.id)
         launched.append({"hypothesis": h, "id": it.id, "status": it.status, "t0": time.time()})
     (log_dir / "agents.json").write_text(json.dumps(launched, indent=1))
     return launched
+
+
+def _usage(it) -> dict:
+    u = getattr(it, "usage", None)
+    return u.model_dump() if u is not None and hasattr(u, "model_dump") else {}
 
 
 def poll_agents(argon: Argon, launched: list[dict], log_dir: Path, timeout_s: float = 1800,
@@ -250,6 +259,7 @@ def poll_agents(argon: Argon, launched: list[dict], log_dir: Path, timeout_s: fl
             if it.status in ("in_progress", "queued"):
                 continue
             pending.pop(iid)
+            record_spend("agent_usage", f"swarm_{a['hypothesis']}", AGENT, _usage(it), it.status == "completed", iid)
             text = it.output_text or ""
             try:
                 rep = SwarmReport.model_validate(parse_json(text))

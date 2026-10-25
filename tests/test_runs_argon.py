@@ -93,3 +93,36 @@ def test_stale_attachments_removed(tmp_path):
     with pytest.raises(ManualPending):
         ar.ask_text("q", "s", "p", [new])
     assert sorted(p.name for p in (tmp_path / "b" / "q" / "attachments").iterdir()) == ["new.jpg"]
+
+
+def test_budget_cap_blocks_before_network(tmp_path, monkeypatch):
+    import core.argon as a
+    monkeypatch.setattr(a, "STATE", tmp_path / "state")
+    monkeypatch.setenv("WORLDGYM_MAX_CALLS", "0")
+    ar = Argon(tmp_path / "b", backend="gemini")
+    monkeypatch.setattr(Argon, "client", property(lambda self: (_ for _ in ()).throw(AssertionError("network"))))
+    with pytest.raises(a.BudgetExceeded):
+        ar.ask_text("q", "s", "p")
+
+
+def test_cache_hit_costs_nothing(tmp_path, monkeypatch):
+    import core.argon as a
+    monkeypatch.setattr(a, "STATE", tmp_path / "state")
+    monkeypatch.setenv("WORLDGYM_MAX_CALLS", "0")
+    key = Argon._cache_key(a.ARGON, "s", "p", [], "medium", False, None, a.DEFAULT_MAX_OUTPUT)
+    (tmp_path / "state" / "cache").mkdir(parents=True)
+    (tmp_path / "state" / "cache" / f"{key}.json").write_text(json.dumps({"text": "cached answer"}))
+    text, resp = Argon(tmp_path / "b", backend="gemini").ask_text("q", "s", "p")
+    assert text == "cached answer" and resp["cached"]
+
+
+def test_daily_ledger_cap(tmp_path, monkeypatch):
+    import core.argon as a
+    monkeypatch.setattr(a, "STATE", tmp_path / "state")
+    monkeypatch.setenv("WORLDGYM_DAILY_CALLS", "2")
+    a.record_spend("model", "x", a.ARGON, {"total_input_tokens": 1000, "total_output_tokens": 500}, True)
+    a.check_budget("model")
+    a.record_spend("model", "y", a.ARGON, None, True)
+    with pytest.raises(a.BudgetExceeded, match="daily cap"):
+        a.check_budget("model")
+    assert a.spend_summary()["usd_est"] == pytest.approx(0.007)

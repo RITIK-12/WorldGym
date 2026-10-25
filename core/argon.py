@@ -6,10 +6,19 @@
 
 Every request writes a bundle runs/<id>/argon/<name>/{system.md, prompt.md, attachments/, response.json}.
 JSON hygiene: ask for ONE object, strip code fences, validate with pydantic, re-ask once with the validation error.
+
+Spend guard (live backend only). Identical requests are served from a content-addressed cache and never re-hit the
+API. Every live call or Managed Agent launch first checks hard caps and is appended to .worldgym/api_ledger.jsonl:
+  WORLDGYM_MAX_CALLS   (default 30)   live model calls per process
+  WORLDGYM_DAILY_CALLS (default 150)  live model calls per calendar day, across processes
+  WORLDGYM_DAILY_USD   (default 15)   estimated spend per day ($2 / 1M input, $10 / 1M output+thinking tokens)
+  WORLDGYM_DAILY_AGENTS (default 8)   Managed Agent launches per day
+thinking_level defaults to "medium"; max_output_tokens is capped per call (thinking + answer share it).
 """
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -17,6 +26,7 @@ import re
 import shutil
 import time
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import TypeVar
 
@@ -24,17 +34,34 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError
 
 REPO = Path(__file__).resolve().parents[1]
-load_dotenv(REPO / ".env")
 
 ARGON = "gemini-4-argon"
 FLASH = "gemini-3.8-flash"
 LITE = "gemini-3.5-flash-lite"
 REPLAY_DIR = Path(os.environ.get("WORLDGYM_REPLAY_DIR", REPO / "replay_cache"))
+STATE = Path(os.environ.get("WORLDGYM_STATE", REPO / ".worldgym"))
 INLINE_VIDEO_MAX = 18 * 1024 * 1024
 POLL_S = 3.0
 TIMEOUT_S = 20 * 60
+DEFAULT_MAX_OUTPUT = 32768
+USD_PER_M_IN, USD_PER_M_OUT = 2.0, 10.0
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _load_env() -> None:
+    """Repo .env first, then the parent folder's; accept the key under any capitalisation of GEMINI_API_KEY."""
+    for p in (REPO / ".env", REPO.parent / ".env"):
+        if p.exists():
+            load_dotenv(p, override=False)
+    if not os.environ.get("GEMINI_API_KEY"):
+        for k, v in list(os.environ.items()):
+            if k.strip().lower() == "gemini_api_key" and v.strip():
+                os.environ["GEMINI_API_KEY"] = v.strip().strip("'\"")
+                break
+
+
+_load_env()
 
 
 class ManualPending(Exception):
@@ -45,6 +72,10 @@ class ArgonError(Exception):
     pass
 
 
+class BudgetExceeded(ArgonError):
+    pass
+
+
 @dataclass
 class CallLog:
     name: str
@@ -52,10 +83,86 @@ class CallLog:
     backend: str
     seconds: float
     ok: bool
+    cached: bool = False
+    usd: float = 0.0
 
 
 CALLS: list[CallLog] = []   # process-wide call log for the scorecard ("model calls")
 
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Spend guard
+# ----------------------------------------------------------------------------------------------------------------------
+
+def _caps() -> dict:
+    return {"max_calls": int(os.environ.get("WORLDGYM_MAX_CALLS", 30)),
+            "daily_calls": int(os.environ.get("WORLDGYM_DAILY_CALLS", 150)),
+            "daily_usd": float(os.environ.get("WORLDGYM_DAILY_USD", 15)),
+            "daily_agents": int(os.environ.get("WORLDGYM_DAILY_AGENTS", 8))}
+
+
+def _ledger_path() -> Path:
+    return STATE / "api_ledger.jsonl"
+
+
+def ledger_today() -> list[dict]:
+    p = _ledger_path()
+    if not p.exists():
+        return []
+    today = date.today().isoformat()
+    rows = []
+    for line in p.read_text().splitlines():
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if r.get("day") == today:
+            rows.append(r)
+    return rows
+
+
+def spend_summary() -> dict:
+    rows = ledger_today()
+    return {"day": date.today().isoformat(), "model_calls": sum(r["kind"] == "model" for r in rows),
+            "agents": sum(r["kind"] == "agent" for r in rows), "usd_est": round(sum(r.get("usd", 0) for r in rows), 3),
+            "process_live_calls": sum(1 for c in CALLS if c.backend == "gemini" and not c.cached), "caps": _caps()}
+
+
+def check_budget(kind: str = "model") -> None:
+    caps, s = _caps(), spend_summary()
+    if kind == "model" and s["process_live_calls"] >= caps["max_calls"]:
+        raise BudgetExceeded(f"per-process cap reached ({caps['max_calls']} live calls); raise WORLDGYM_MAX_CALLS")
+    if kind == "model" and s["model_calls"] >= caps["daily_calls"]:
+        raise BudgetExceeded(f"daily cap reached ({caps['daily_calls']} live calls); raise WORLDGYM_DAILY_CALLS")
+    if kind == "agent" and s["agents"] >= caps["daily_agents"]:
+        raise BudgetExceeded(f"daily agent cap reached ({caps['daily_agents']}); raise WORLDGYM_DAILY_AGENTS")
+    if s["usd_est"] >= caps["daily_usd"]:
+        raise BudgetExceeded(f"daily spend cap reached (~${s['usd_est']:.2f}); raise WORLDGYM_DAILY_USD")
+
+
+def record_spend(kind: str, name: str, model: str, usage: dict | None, ok: bool, interaction_id: str | None = None) -> float:
+    u = usage or {}
+    tin = u.get("total_input_tokens") or 0
+    tout = (u.get("total_output_tokens") or 0) + (u.get("total_thought_tokens") or 0)
+    usd = round(tin / 1e6 * USD_PER_M_IN + tout / 1e6 * USD_PER_M_OUT, 5)
+    STATE.mkdir(parents=True, exist_ok=True)
+    row = {"day": date.today().isoformat(), "time": datetime.now().strftime("%H:%M:%S"), "kind": kind, "name": name,
+           "model": model, "ok": ok, "input_tokens": tin, "output_tokens": tout, "usd": usd, "id": interaction_id}
+    with _ledger_path().open("a") as f:
+        f.write(json.dumps(row) + "\n")
+    return usd
+
+
+def _usage_dict(it) -> dict:
+    u = getattr(it, "usage", None)
+    if u is None:
+        return {}
+    return u.model_dump() if hasattr(u, "model_dump") else dict(u)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# JSON helpers
+# ----------------------------------------------------------------------------------------------------------------------
 
 def strip_fences(text: str) -> str:
     t = text.strip()
@@ -87,14 +194,18 @@ def parse_json(text: str):
         return json.loads(t[:end])
 
 
+# ----------------------------------------------------------------------------------------------------------------------
+# Adapter
+# ----------------------------------------------------------------------------------------------------------------------
+
 class Argon:
     def __init__(self, bundle_root: str | Path, backend: str | None = None, replay_dir: str | Path | None = None):
         self.root = Path(bundle_root)
         self.backend = backend or os.environ.get("WORLDGYM_LLM", "gemini")
         self.replay_dir = Path(replay_dir) if replay_dir else REPLAY_DIR
+        self.use_cache = os.environ.get("WORLDGYM_CACHE", "1") != "0"
         self._client = None
 
-    # ------------------------------------------------------------------------------------------------------------------
     @property
     def client(self):
         if self._client is None:
@@ -141,41 +252,57 @@ class Argon:
             raise ArgonError(f"upload of {p.name} failed: {f.error}")
         return f.uri
 
-    def _gemini(self, model: str, system: str, parts: list[dict], thinking: str, json_mode: bool,
-                previous_id: str | None) -> tuple[str, str, dict]:
-        kw = dict(model=model, input=parts, system_instruction=system, background=True,
-                  generation_config={"thinking_level": thinking, "max_output_tokens": 65536})
+    def _create(self, name: str, model: str, kw: dict):
+        try:
+            return self.client.interactions.create(**kw)
+        except Exception:
+            record_spend("model", name, model, None, False)
+            raise
+
+    def _gemini(self, name: str, model: str, system: str, parts: list[dict], thinking: str, json_mode: bool,
+                previous_id: str | None, max_output_tokens: int, background: bool) -> tuple[str, str, dict]:
+        check_budget("model")
+        kw = dict(model=model, input=parts, system_instruction=system, background=background,
+                  generation_config={"thinking_level": thinking, "max_output_tokens": max_output_tokens})
+        if not background:
+            kw["timeout"] = TIMEOUT_S
         if previous_id:
             kw["previous_interaction_id"] = previous_id
-        if json_mode:
-            kw["response_mime_type"] = "application/json"
-        try:
-            it = self.client.interactions.create(**kw)
-        except Exception as e:  # noqa: BLE001 - some models reject JSON mode without a schema; retry plain
-            if json_mode and "response" in str(e).lower():
-                kw.pop("response_mime_type")
-                it = self.client.interactions.create(**kw)
-            else:
-                raise
+        # JSON is enforced by the prompt contract + pydantic validation (+ one re-ask); the server requires a full
+        # response_format schema whenever response_mime_type is set, which pydantic schemas do not always satisfy.
+        it = self._create(name, model, kw)
         t0 = time.time()
         while it.status in ("in_progress", "queued"):
             if time.time() - t0 > TIMEOUT_S:
                 self.client.interactions.cancel(it.id)
+                record_spend("model", name, model, None, False, it.id)
                 raise ArgonError(f"interaction {it.id} timed out")
             time.sleep(POLL_S)
             it = self.client.interactions.get(it.id)
+        usage = _usage_dict(it)
+        record_spend("model", name, model, usage, it.status == "completed", it.id)
         if it.status != "completed":
             raise ArgonError(f"interaction {it.id} ended {it.status}: {getattr(it, 'errors', None)}")
-        usage = it.usage.model_dump() if getattr(it, "usage", None) is not None and hasattr(it.usage, "model_dump") else {}
         return it.output_text or "", it.id, usage
 
-    # ------------------------------------------------------------------------------------------------------------------
+    @staticmethod
+    def _cache_key(model, system, prompt, attachments, thinking, json_mode, previous_id, max_output_tokens) -> str:
+        h = hashlib.sha256()
+        h.update(json.dumps([model, system, prompt, thinking, json_mode, previous_id, max_output_tokens]).encode())
+        for p in attachments:
+            h.update(hashlib.sha256(Path(p).read_bytes()).digest())
+        return h.hexdigest()[:32]
+
     def ask_text(self, name: str, system: str, prompt: str, attachments: list[str | Path] = (), model: str = ARGON,
-                 thinking: str = "high", json_mode: bool = False, previous_id: str | None = None) -> tuple[str, dict]:
+                 thinking: str = "medium", json_mode: bool = False, previous_id: str | None = None,
+                 max_output_tokens: int = DEFAULT_MAX_OUTPUT, background: bool | None = None) -> tuple[str, dict]:
         attachments = [Path(a) for a in attachments]
+        if background is None:  # background serving rejects image/video input; media calls run synchronously
+            background = not attachments
         b = self._bundle(name, system, prompt, attachments)
         resp_path = b / "response.json"
         t0 = time.time()
+        cached = False
         if self.backend == "replay":
             src = self.replay_dir / f"{name}.json"
             if not src.exists():
@@ -187,28 +314,43 @@ class Argon:
             else:
                 raise ManualPending(str(b))
         elif self.backend == "gemini":
-            try:
-                text, iid, usage = self._gemini(model, system, self._parts(prompt, attachments), thinking,
-                                                json_mode, previous_id)
-            except Exception:
-                CALLS.append(CallLog(name, model, self.backend, time.time() - t0, False))
-                raise
-            resp = {"text": text, "interaction_id": iid, "model": model, "usage": usage,
-                    "seconds": round(time.time() - t0, 1)}
-            REPLAY_DIR.mkdir(parents=True, exist_ok=True)
-            (REPLAY_DIR / f"{name}.json").write_text(json.dumps(resp, indent=1))
+            key = self._cache_key(model, system, prompt, attachments, thinking, json_mode, previous_id,
+                                  max_output_tokens)
+            cpath = STATE / "cache" / f"{key}.json"
+            if self.use_cache and cpath.exists():
+                resp, cached = json.loads(cpath.read_text()), True
+            else:
+                try:
+                    text, iid, usage = self._gemini(name, model, system, self._parts(prompt, attachments), thinking,
+                                                    json_mode, previous_id, max_output_tokens, background)
+                except Exception:
+                    CALLS.append(CallLog(name, model, self.backend, time.time() - t0, False))
+                    raise
+                resp = {"text": text, "interaction_id": iid, "model": model, "usage": usage,
+                        "seconds": round(time.time() - t0, 1), "thinking_level": thinking}
+                cpath.parent.mkdir(parents=True, exist_ok=True)
+                cpath.write_text(json.dumps(resp, indent=1))
+                REPLAY_DIR.mkdir(parents=True, exist_ok=True)
+                (REPLAY_DIR / f"{name}.json").write_text(json.dumps(resp, indent=1))
         else:
             raise ArgonError(f"unknown backend {self.backend!r}")
         resp.setdefault("backend", self.backend)
+        resp["cached"] = cached
         resp_path.write_text(json.dumps(resp, indent=1))
-        CALLS.append(CallLog(name, resp.get("model", model), self.backend, time.time() - t0, True))
+        u = resp.get("usage") or {}
+        usd = ((u.get("total_input_tokens") or 0) * USD_PER_M_IN
+               + ((u.get("total_output_tokens") or 0) + (u.get("total_thought_tokens") or 0)) * USD_PER_M_OUT) / 1e6
+        CALLS.append(CallLog(name, resp.get("model", model), self.backend, time.time() - t0, True, cached,
+                             0.0 if cached else usd))
         return resp["text"], resp
 
     def ask_json(self, name: str, system: str, prompt: str, schema: type[T], attachments: list[str | Path] = (),
-                 model: str = ARGON, thinking: str = "high") -> tuple[T, dict]:
+                 model: str = ARGON, thinking: str = "medium",
+                 max_output_tokens: int = DEFAULT_MAX_OUTPUT) -> tuple[T, dict]:
         rule = ("\n\nReturn exactly ONE JSON object and nothing else (no prose, no code fences). It must validate "
                 f"against this JSON schema:\n{json.dumps(schema.model_json_schema())}")
-        text, resp = self.ask_text(name, system, prompt + rule, attachments, model, thinking, json_mode=True)
+        text, resp = self.ask_text(name, system, prompt + rule, attachments, model, thinking, json_mode=True,
+                                   max_output_tokens=max_output_tokens)
         try:
             return schema.model_validate(parse_json(text)), resp
         except (ValidationError, json.JSONDecodeError, ValueError) as e:
@@ -216,13 +358,15 @@ class Argon:
         fix = f"Your previous answer failed validation:\n{err}\n\nReturn the corrected single JSON object only."
         if resp.get("interaction_id") and self.backend == "gemini":  # multi-turn: no need to resend attachments
             text2, resp2 = self.ask_text(f"{name}__fix", system, fix, (), model, thinking, json_mode=True,
-                                         previous_id=resp["interaction_id"])
+                                         previous_id=resp["interaction_id"], max_output_tokens=max_output_tokens)
         else:
             text2, resp2 = self.ask_text(f"{name}__fix", system, f"{prompt}{rule}\n\nPrevious answer:\n{text[:20000]}"
-                                         f"\n\n{fix}", attachments, model, thinking, json_mode=True)
+                                         f"\n\n{fix}", attachments, model, thinking, json_mode=True,
+                                         max_output_tokens=max_output_tokens)
         return schema.model_validate(parse_json(text2)), resp2
 
 
 def call_summary() -> dict:
-    return {"calls": len(CALLS), "ok": sum(c.ok for c in CALLS), "seconds": round(sum(c.seconds for c in CALLS), 1),
+    return {"calls": len(CALLS), "ok": sum(c.ok for c in CALLS), "cached": sum(c.cached for c in CALLS),
+            "seconds": round(sum(c.seconds for c in CALLS), 1), "usd_est": round(sum(c.usd for c in CALLS), 4),
             "by_model": {m: sum(c.model == m for c in CALLS) for m in {c.model for c in CALLS}}}

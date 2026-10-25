@@ -28,3 +28,6 @@ replay_cache/
 
 # Locked held-out suites stay on the scoring machine
 benchmarks/*/held_out*
+
+# Local API spend ledger and response cache
+.worldgym/

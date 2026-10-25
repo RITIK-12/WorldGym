@@ -2,7 +2,8 @@
 
 Argon identifies the robot (closest Menagerie model), the objects (shape vocabulary + full-extent size guesses),
 task phases, per-keyframe robot/object boxes and the gripper point/open/held state, a rest frame for the camera
-solve and a verbal camera estimate. Flash then labels extra frames densely for motion extraction.
+solve and a verbal camera estimate. Argon at low thinking then labels extra frames densely for motion extraction
+(Flash does not accept image input on this account, so it is kept for text-only checks).
 
 Coordinates follow the Gemini convention: boxes [ymin, xmin, ymax, xmax] and points [y, x], normalised 0..1000.
 """
@@ -14,7 +15,7 @@ from pathlib import Path
 import imageio_ffmpeg
 from pydantic import BaseModel
 
-from core.argon import ARGON, FLASH, Argon
+from core.argon import ARGON, Argon
 from core.mjcf_compiler import MENAGERIE
 from core.schemas import Keyframe, VideoUnderstanding
 
@@ -115,7 +116,7 @@ Produce:
 
 def dense_labels(video: str | Path, times: list[float], vu: VideoUnderstanding, argon: Argon,
                  out_dir: str | Path, batch: int = 8) -> list[Keyframe]:
-    """Flash labels gripper point/open/held + object boxes on extra frames (motion extraction needs them)."""
+    """Argon (low thinking) labels gripper point/open/held + object boxes on extra frames for motion extraction."""
     from core.video_probe import extract_frames
 
     out_dir = Path(out_dir)
@@ -134,8 +135,8 @@ Frames attached:
 For EVERY frame return a keyframe entry with its exact t: robot_box, object_boxes for each visible object id
 (use only these ids), and gripper = [{{arm, uv, open, held}}] where uv is the fingertip midpoint, open is whether
 the fingers are open, and held is the id of the object currently held between the fingers (else null)."""
-        out, _ = argon.ask_json(f"dense_labels_{b // batch:02d}", SYSTEM, text, KeyframeBatch, frames, model=FLASH,
-                                thinking="low")
+        out, _ = argon.ask_json(f"dense_labels_{b // batch:02d}", SYSTEM, text, KeyframeBatch, frames, model=ARGON,
+                                thinking="low", max_output_tokens=16384)
         snap = list(ts)
         for kf in out.keyframes:
             kf.t = min(snap, key=lambda s: abs(s - kf.t))

@@ -29,6 +29,16 @@ cp .env.example .env             # add GEMINI_API_KEY
 | 7 | Benchmark + locked held-out | done | dev 12 scenarios in ~9 s (8 workers); Draft 1 5/12, v3 10/12 |
 | 8 | Loop 2 critic | done (replay-tested) | cached critique turns failing Draft 1 into a passing Draft 2 |
 | 9 | Loop 3 swarm | done (local), live path written | 4 hypotheses x 24 rollouts each find failures in v3 |
+| 10 | Pipeline orchestrator (policy half) | done (replay-tested) | replay → benchmark → Loop 2 → Loop 3 → report, all stages in the run manifest |
+| 11 | Live Gemini API + spend guard | done | Argon text + video/image calls verified; ~$0.006 spent on smoke tests |
+
+## API spend guard
+
+Live calls go through `core/argon.py`, which serves identical requests from a local cache and enforces hard caps
+before every call (ledger in `.worldgym/api_ledger.jsonl`, gitignored):
+`WORLDGYM_MAX_CALLS` (30 per process), `WORLDGYM_DAILY_CALLS` (150), `WORLDGYM_DAILY_USD` (15),
+`WORLDGYM_DAILY_AGENTS` (8), `WORLDGYM_AGENT_MAX_TOKENS` (400k per Managed Agent). `WORLDGYM_LLM=replay` runs
+the whole pipeline from cached responses with zero API calls.
 
 ## How to run
 
@@ -61,3 +71,16 @@ uv run pytest -q
   hypothesis (barrier clearance, container fit, grasp seating, reach limits) searches inside the dev ranges and
   bisects toward the least extreme failing scenario. Live workers are Antigravity Managed Agents whose remote
   sandbox gets the tracked source files inline (the repo is private and `benchmarks/` must never reach an agent).
+- **12:24** Pipeline orchestrator for the policy half, verified offline with the replay backend. Live API wired
+  in: key loaded from `.env` (repo or parent folder), per-call `max_output_tokens` caps, `thinking_level` medium by
+  default (high only for the Video Architect, critic and hardening, low for dense labels), and the spend guard above.
+
+## Lessons (API quirks found today)
+
+- `gemini-3.8-flash` rejects image input on this account ("Image input modality is not enabled"), so all vision
+  calls use `gemini-4-argon` (low thinking for dense labelling).
+- `background=True` requests are served by an `-agent` variant that rejects image/video parts. Media calls run
+  synchronously with a 20-minute client timeout; text-only calls stay in background mode.
+- Setting `response_mime_type` without a full `response_format` schema is a 400 in synchronous mode. JSON is
+  enforced by the prompt contract + pydantic validation + one re-ask instead.
+- Video costs ~1.2k input tokens for a 16 s 640 px clip, an image ~1.1k: a full Video Architect call is cents.
