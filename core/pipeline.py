@@ -1,6 +1,7 @@
 """Orchestrator (deterministic demo path): Python drives the stages in order and calls Argon only for judgements.
 
 Twin half (video in):   qa -> video_architect -> robot_onboard -> camera_solve -> loop1_static -> motion_extract
+                        -> replay_critic
 Policy half (any task): replay -> benchmark -> loop2_critic -> loop3_swarm -> report
 
     uv run python -m core.pipeline --video demo/clip.mp4 --prompt "put both blocks in the bin"
@@ -25,7 +26,8 @@ from core.runs import Refused, Run, new_run
 from core.schemas import PolicyConfig, RobotAdapter, TaskSpec
 from core.swarm import adversarial_suite, harden, hypotheses_from_clusters, launch_agents, local_search, poll_agents
 
-TWIN_STAGES = ["qa", "video_architect", "robot_onboard", "camera_solve", "loop1_static", "motion_extract"]
+TWIN_STAGES = ["qa", "video_architect", "robot_onboard", "camera_solve", "loop1_static", "motion_extract",
+               "replay_critic"]
 POLICY_STAGES = ["replay", "benchmark", "loop2_critic", "loop3_swarm", "report"]
 
 

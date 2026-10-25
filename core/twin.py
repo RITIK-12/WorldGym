@@ -2,6 +2,7 @@
 
 qa -> video_architect -> robot_onboard -> camera_solve -> loop1_static (Scene Author + Twin Critic loop)
    -> motion_extract (parallel Robotics-ER labellers -> contact-constrained waypoints -> Draft 1 -> dynamic fidelity)
+   -> replay_critic (Argon watches real | sim side by side and patches Draft 1 toward the demonstration)
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from core.argon import Argon
 from core.camera_solve import add_video_camera, apply_solution, render_body_mask, solve_camera
 from core.fidelity import measure_footprint, run_loop1
 from core.motion_extract import extract
+from core.replay_critic import run_replay_critic
 from core.robot_onboard import onboard
 from core.rollout import build_sim, run_episode
 from core.runs import Refused, Run
@@ -135,40 +137,56 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
         run.write_json("motion/motion_extract.json", log)
         run.write_json("motion/draft1.json", draft1.model_dump())
         ep = run_episode(task, draft1)
-        dyn = dynamic_fidelity(video, vu, task, ep, labels, w, h, cam_task)
+        real_end = real_end_positions(video, task, labels)
+        err, per = end_pose_error(task, ep, real_end)
+        dyn = {"replay_success": ep.success, "end_pose_err_mm": err, "per_object_mm": per, "real_end_xy": real_end}
         s.headline = (f"Draft 1 from {len(labels)} labelled frames · replay "
                       f"{'succeeds' if ep.success else 'fails'}"
-                      + (f" · end error {dyn['end_pose_err_mm']:.0f} mm" if dyn.get("end_pose_err_mm") is not None else ""))
+                      + (f" · end error {err:.0f} mm" if err is not None else ""))
         s.data = {"segments": log["segments"], "dynamic": dyn, "n_labels": len(labels)}
         s.artifacts += ["motion/labels.json", "motion/motion_extract.json", "motion/draft1.json"]
+
+    with run.stage("replay_critic") as s:
+        grasp_t = log["segments"][0]["grasp_t"]
+        rc = run_replay_critic(video, task, draft1, adapter, argon, grasp_t, log,
+                               lambda e: end_pose_error(task, e, real_end)[0], run.path("replay_critic"))
+        draft1 = rc["draft"].model_copy(update={"name": "draft1"})
+        run.write_json("motion/draft1.json", draft1.model_dump())
+        dyn = {**dyn, "replay_success": rc["episode"].success, "end_pose_err_mm": rc["end_pose_err_mm"],
+               "before_critic": rc["start"]}
+        e0, e1 = rc["start"]["end_pose_err_mm"], rc["end_pose_err_mm"]
+        s.headline = ("replay " + ("succeeds" if rc["episode"].success else "fails")
+                      + (f" · end error {e0:.0f} → {e1:.0f} mm" if e0 is not None and e1 is not None else ""))
+        s.data = {"history": rc["history"], "dynamic": dyn}
+        s.artifacts += [run.rel(rc["video"])] + [run.rel(h["video"]) for h in rc["history"] if h.get("video")]
     return {"task": task, "draft1": draft1, "adapter": adapter, "dynamic_ref": dyn, "vu": vu}
 
 
-def dynamic_fidelity(video: str, vu: VideoUnderstanding, task: TaskSpec, ep, labels, w: int, h: int,
-                     cam_task: TaskSpec) -> dict:
-    """End-pose error of the moved objects (sim end state vs the last video frame) + replay success."""
+def real_end_positions(video: str, task: TaskSpec, labels) -> dict[str, list[float]]:
+    """Table positions of the moved objects in the last labelled frame (metric footprints)."""
     last = max((k for k in labels if k.object_boxes), key=lambda k: k.t, default=None)
-    out = {"replay_success": ep.success, "end_pose_err_mm": None, "per_object_mm": {}}
     if last is None:
-        return out
+        return {}
     frame = _frame(video, last.t)
     masks = masks_from_boxes(frame, last.object_boxes)
-    probe_task = task.model_copy(update={"objects": []})
-    sim = build_sim(probe_task)
-    end_sim = build_sim(task)
-    end_sim.d.qpos[:] = ep.arrays["qpos"][-1]
-    mujoco.mj_forward(end_sim.m, end_sim.d)
-    moved = {p.object_id for p in (task.phases or []) if p.object} or {o.id for o in task.objects if not o.is_fixed}
-    errs = {}
+    sim = build_sim(task.model_copy(update={"objects": []}))
+    moved = {p.object_id for p in task.immutable_success_predicates if p.target_id} or \
+            {o.id for o in task.objects if not o.is_fixed and not o.is_obstacle}
+    out = {}
     for o in task.objects:
-        if o.id not in moved or o.id not in masks:
-            continue
-        fp = measure_footprint(sim.ix, sim.d, "video", masks[o.id], max(o.dims_m[2], 0.02))
-        if fp is None:
-            continue
-        sim_xy = end_sim.d.xpos[end_sim.ix.obj_body[o.id]][:2]
-        errs[o.id] = round(float(np.linalg.norm(np.asarray(fp["xy"]) - sim_xy)) * 1000, 1)
-    if errs:
-        out["per_object_mm"] = errs
-        out["end_pose_err_mm"] = float(np.mean(list(errs.values())))
+        if o.id in moved and o.id in masks:
+            fp = measure_footprint(sim.ix, sim.d, "video", masks[o.id], max(o.dims_m[2], 0.02))
+            if fp:
+                out[o.id] = fp["xy"]
     return out
+
+
+def end_pose_error(task: TaskSpec, ep, real_end: dict) -> tuple[float | None, dict]:
+    if not real_end:
+        return None, {}
+    sim = build_sim(task)
+    sim.d.qpos[:] = ep.arrays["qpos"][-1]
+    mujoco.mj_forward(sim.m, sim.d)
+    per = {oid: round(float(np.linalg.norm(np.asarray(xy) - sim.d.xpos[sim.ix.obj_body[oid]][:2])) * 1000, 1)
+           for oid, xy in real_end.items()}
+    return float(np.mean(list(per.values()))), per
