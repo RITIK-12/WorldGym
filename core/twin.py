@@ -246,7 +246,15 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
             draft = fallback_scene(vu, measured)
             s.data["author_error"] = str(e)[:300]
         task = make_task(run.run_id.split("_", 1)[-1] or "twin", adapter.robot_id, draft, cam_task, vu)
-        publish_gen(run, 1, "First world", f"{len(task.objects)} objects placed by the Scene Author", task, adapter)
+        try:   # Gen 1 already replays the demonstration: the labelling swarm ran alongside the stages above
+            sim1 = build_sim(task, adapter)
+            pol1 = (extract_multi(task, labels_job.result(), sim1, w, h, cam_at) if n_arms > 1 or moving
+                    else extract(task, labels_job.result(), sim1, w, h))[0]
+        except Exception as e:  # noqa: BLE001 - show the static world rather than nothing
+            pol1 = None
+            s.data["gen1_motion_error"] = str(e)[:300]
+        publish_gen(run, 1, "First world", f"{len(task.objects)} objects placed by the Scene Author", task, adapter,
+                    pol1 if pol1 is not None and pol1.primitives else None)
         context = f"Task: {vu.success_intent}. Robot: {adapter.robot_id} ({n_arms} arm(s))."
         res = run_loop1(task, frame, masks, run.path("loop1"), argon=argon, context=context,
                         robot_mask=best["mask"], build=lambda t: posed_sim(t, adapter, pose))

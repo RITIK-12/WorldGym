@@ -1,14 +1,17 @@
-"""WorldGym demo: a chat-style sidebar (upload a clip, prompt, convert, progress) and the 3D twin as the page.
+"""WorldGym demo: upload a robot clip, press Convert, watch the MuJoCo world appear and run it.
 
     .venv/bin/python -m app.demo [--port 8090] [--video clip.mp4] [--run runs/<id>] [--cached]
 
-Convert starts `core.pipeline --twin-only` with Argon's response cache off (WORLDGYM_CACHE=0) unless --cached.
-Results arrive as generations (runs/<id>/gens): Gen 1 is the first world, Gen 2 the critiqued twin replaying the
-demonstrated motion, Gen 3 the motion after the Replay Critic. The newest generation is always on screen.
+Sidebar: upload, a looping preview of the clip, Convert to sim, a four-step checklist with a progress bar and one
+live status line. Convert starts `core.pipeline --twin-only` with Argon's response cache off (WORLDGYM_CACHE=0)
+unless --cached. Results arrive as generations (runs/<id>/gens), each a world plus the demonstrated motion:
+Gen 1 the first world, Gen 2 after the 4-view Twin Critic, Gen 3 after the Replay Critic. "Run simulation" plays
+the selected generation's policy live in MuJoCo physics, in real time.
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import json
 import os
@@ -16,22 +19,22 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
-import cv2
 import numpy as np
 import viser
 
 import core.runs as runs
-from app.scene import FPS, Replay, SceneMirror, load_replay, static_replay
+from app.scene import SceneMirror
 from core.mjcf_compiler import FLOOR_Z
-from core.rollout import build_sim
-from core.schemas import TaskSpec
+from core.rollout import build_sim, run_episode
+from core.schemas import PolicyConfig, TaskSpec
 
 REPO = Path(__file__).resolve().parents[1]
-UPLOADS = REPO / ".worldgym" / "uploads"
-PROMPT = "Reconstruct this robotic manipulation task as an interactive physics simulation."
-BLUE, INK, INK2, CARD, OK, BAD = "#3987e5", "#e8e8ea", "#9a9aa2", "#25262b", "#3fb950", "#f85149"
+WORK = REPO / ".worldgym"
+PROMPT = "Reconstruct the demonstrated task as a physics simulation."
+BLUE, INK, INK2, OK, BAD = "#3987e5", "#e8e8ea", "#9a9aa2", "#3fb950", "#f85149"
 SPIN = ('<style>@keyframes wgspin{to{transform:rotate(360deg)}}</style><span style="display:inline-block;width:11px;'
         f'height:11px;border:2px solid {BLUE};border-top-color:transparent;border-radius:50%;'
         'animation:wgspin .9s linear infinite"></span>')
@@ -42,25 +45,29 @@ STEPS = [("Video understood", ("qa", "video_architect", "robot_onboard")),
          ("World constructed", ("loop1_static",)),
          ("Refining simulation", ("motion_extract", "gen2", "replay_critic", "gen3"))]
 ORDER = [m for _, ms in STEPS for m in ms]
-SAY = {"qa": "Clip checked", "video_architect": "Argon watched the video", "robot_onboard": "Robot identified",
-       "camera_solve": "Camera calibrated from the robot's silhouette", "loop1_static": "Twin Critic (4-view)",
-       "motion_extract": "Motion extracted by the labelling swarm", "replay_critic": "Replay Critic (real vs sim)",
-       "gen1": "Scene Author is placing assets (SimReady)", "gen2": "Replaying the demonstrated motion",
-       "gen3": "Replaying the refined motion"}
+DOING = {"qa": "Checking the clip",
+         "video_architect": "Argon is watching the video and segmenting the actions",
+         "robot_onboard": "Identifying the robot by comparing rendered candidates",
+         "camera_solve": "Calibrating the camera from the robot's silhouette",
+         "gen1": "Building the first world (SimReady assets) and its motion",
+         "loop1_static": "Twin Critic is comparing four views of the twin with the video",
+         "motion_extract": "Re-extracting the motion on the corrected twin",
+         "gen2": "Re-extracting the motion on the corrected twin",
+         "replay_critic": "Replay Critic is watching real and sim side by side",
+         "gen3": "Replay Critic is watching real and sim side by side"}
 
 
-def _duration(path: Path) -> float:
-    cap = cv2.VideoCapture(str(path))
-    n, fps = cap.get(cv2.CAP_PROP_FRAME_COUNT), cap.get(cv2.CAP_PROP_FPS) or 30.0
-    cap.release()
-    return n / fps
-
-
-def _bubble(text: str, user: bool = False, colour: str = CARD) -> str:
-    side = "flex-end" if user else "flex-start"
-    bg = BLUE if user else colour
-    return (f'<div style="display:flex;justify-content:{side}"><div style="max-width:88%;background:{bg};color:{INK};'
-            f'padding:8px 11px;border-radius:12px;font-size:13px;line-height:1.4">{text}</div></div>')
+def preview_html(video: Path) -> str:
+    """A small H.264 copy of the clip, embedded so every viewer sees the input."""
+    out = WORK / "previews" / f"{video.stem}_{int(video.stat().st_mtime)}.mp4"
+    if not out.exists():
+        out.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-vf", "scale=480:-2", "-c:v", "libx264",
+                        "-preset", "veryfast", "-crf", "30", "-an", "-movflags", "+faststart", str(out)], check=True)
+    b64 = base64.b64encode(out.read_bytes()).decode()
+    return (f'<video autoplay muted loop playsinline style="width:100%;border-radius:10px;display:block;'
+            f'background:#000" src="data:video/mp4;base64,{b64}"></video>'
+            f'<div style="font-size:12px;color:{INK2};padding:4px 2px 0">{html.escape(video.name)}</div>')
 
 
 class Demo:
@@ -69,20 +76,15 @@ class Demo:
         self.mirror = SceneMirror(server)
         self.lock = threading.RLock()
         self.video: Path | None = None
-        self.prompt_sent = ""
         self.proc: subprocess.Popen | None = None
         self.launched = 0.0
         self.name = ""
         self.run_dir: Path | None = None
-        self.shown = ""            # key of what the 3D view shows
-        self.replay: Replay | None = None
-        self.t = 0.0
-        self.playing = True
+        self.shown = ""            # what the 3D view shows (robot / gen key)
+        self.running = False       # a live physics run is streaming
         self.follow = True         # jump to each new generation
-        self.chat_sig = ""
-        self.caption = ""
+        self.result = ""
         self._build()
-        threading.Thread(target=self._player, daemon=True).start()
 
     # ------------------------------------------------------------------------------------------------------------------
     def _build(self) -> None:
@@ -90,71 +92,80 @@ class Demo:
         gui.configure_theme(dark_mode=True, control_width="large", show_logo=False, show_share_button=False,
                             brand_color=(57, 135, 229))
         gui.main_panel.dock_left()
-        gui.main_panel.set_width(400)
+        gui.main_panel.set_width(420)
         gui.set_panel_label("Create your world")
-        gui.add_html(f'<div style="display:flex;justify-content:space-between;align-items:baseline;padding:2px 0 6px">'
+        gui.add_html(f'<div style="display:flex;justify-content:space-between;align-items:baseline;padding:2px 0 8px">'
                      f'<span style="font-size:20px;font-weight:700;color:{INK}">WorldGym</span>'
                      f'<span style="font-size:12px;color:{INK2}">Video → Physics World</span></div>')
-        self.chat = gui.add_html("")
         self.upload = gui.add_upload_button("Upload video", icon=viser.Icon.UPLOAD, mime_type="video/*")
-        self.prompt = gui.add_text("Prompt", PROMPT, multiline=True)
-        self.go = gui.add_button("Convert to sim", icon=viser.Icon.PLAYER_PLAY, color="blue")
+        self.preview = gui.add_html("", visible=False)
+        self.go = gui.add_button("Convert to sim", icon=viser.Icon.WAND, color="blue", disabled=True)
         self.steps = gui.add_html("")
         self.bar = gui.add_progress_bar(0.0, animated=False)
         self.pct = gui.add_html("")
-        self.gen_dd = gui.add_dropdown("Showing", ("—",), visible=False)
-        self.play = gui.add_button("Pause replay", icon=viser.Icon.PLAYER_PAUSE, visible=False)
-        self.now = gui.add_html("")
+        self.live = gui.add_html("")
+        self.gen_dd = gui.add_dropdown("Generation", ("—",), visible=False)
+        self.run_btn = gui.add_button("Run simulation", icon=viser.Icon.PLAYER_PLAY, color="green", visible=False)
+        self.note = gui.add_html("")
         self.server.scene.add_grid("/floor", width=3.0, height=3.0, position=(0.0, 0.2, FLOOR_Z), cell_size=0.1,
                                    section_size=0.5, cell_color=(55, 55, 58), section_color=(85, 85, 90))
         self.upload.on_upload(lambda e: self.on_upload(e.target.value))
         self.go.on_click(lambda _: self.convert())
         self.gen_dd.on_update(lambda _: self._pick_gen())
-        self.play.on_click(lambda _: self._toggle_play())
-        self.render_chat()
+        self.run_btn.on_click(lambda _: self.run_sim())
+        self.refresh()
 
     # ------------------------------------------------------------------------------------------------------------------
     def on_upload(self, f) -> None:
-        UPLOADS.mkdir(parents=True, exist_ok=True)
-        p = UPLOADS / Path(f.name).name
+        d = WORK / "uploads"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / Path(f.name).name
         p.write_bytes(f.content)
         self.attach(p)
 
     def attach(self, p: Path) -> None:
         with self.lock:
             self.video = p
-            self.render_chat()
+            try:
+                self.preview.content = preview_html(p)
+                self.preview.visible = True
+            except Exception as e:  # noqa: BLE001 - no preview is not fatal
+                self.note.content = f'<div style="color:{INK2};font-size:12px">preview unavailable: {e}</div>'
+            self.go.disabled = self._alive()
 
     def convert(self) -> None:
         with self.lock:
-            if self.video is None:
-                self.now.content = f'<div style="color:{BAD};font-size:13px">Upload a video first.</div>'
+            if self.video is None or self._alive():
                 return
-            if self.proc is not None and self.proc.poll() is None:
-                return
-            self.prompt_sent = self.prompt.value.strip() or PROMPT
             self.name = "".join(c if c.isalnum() else "_" for c in self.video.stem)[:40] or "clip"
             env = {**os.environ, "WORLDGYM_CACHE": "1" if self.cached else "0"}
-            log = open(REPO / ".worldgym" / f"demo_{self.name}.log", "w")
+            log = open(WORK / f"demo_{self.name}.log", "w")
             self.launched = time.time()
             self.proc = subprocess.Popen(
-                [sys.executable, "-m", "core.pipeline", "--video", str(self.video), "--prompt", self.prompt_sent,
+                [sys.executable, "-m", "core.pipeline", "--video", str(self.video), "--prompt", PROMPT,
                  "--name", self.name, "--twin-only"], cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True)   # a UI restart must not kill a live run
-            self.run_dir, self.shown, self.replay, self.follow = None, "", None, True
+            self.run_dir, self.shown, self.follow, self.result = None, "", True, ""
             self.mirror.clear()
+            self.gen_dd.visible = self.run_btn.visible = False
             self.go.disabled = True
-            self.render_chat()
+            self.refresh()
 
     def open_run(self, d: Path) -> None:
-        """Attach to an existing run (no pipeline launch)."""
+        """Attach to an existing (finished or still running) run without launching one."""
         with self.lock:
-            self.run_dir, self.launched = d, 0.0
+            self.run_dir = d
             m = self._manifest() or {}
-            self.prompt_sent = m.get("prompt") or PROMPT
-            self.video = Path(m["video"]) if m.get("video") else self.video
+            if m.get("video") and Path(m["video"]).exists():
+                self.attach(Path(m["video"]).resolve())
 
     # ------------------------------------------------------------------------------------------------------------------
+    def _alive(self) -> bool:
+        if self.proc is not None:
+            return self.proc.poll() is None
+        m = self._manifest() if self.run_dir is not None else None
+        return any(s["status"] == "running" for s in (m or {}).get("stages", []))
+
     def _find_run(self) -> None:
         if self.run_dir is not None or not self.name:
             return
@@ -182,72 +193,23 @@ class Demo:
         gens = self._gens() if self.run_dir is not None else []
         st = {k: v["status"] for k, v in stages.items()}
         have = {g["n"] for g in gens}
-        # each generation is published inside its stage: gen1 by the Scene Author at the start of loop1_static,
+        # each generation is published inside its stage: gen1 at the start of loop1_static (Scene Author),
         # gen2 at the end of motion_extract, gen3 at the end of replay_critic
         for n, stage in ((1, "loop1_static"), (2, "motion_extract"), (3, "replay_critic")):
             st[f"gen{n}"] = "ok" if n in have else ("running" if st.get(stage) == "running" else "pending")
         if st.get("loop1_static") == "running" and 1 not in have:
-            st["loop1_static"] = "pending"   # the Scene Author is still building the first world
+            st["loop1_static"] = "pending"
         return st, stages, gens
 
     # ------------------------------------------------------------------------------------------------------------------
-    def render_chat(self) -> None:
+    def refresh(self) -> None:
         st, stages, gens = self.status()
-        parts = []
-        if self.video is not None:
-            dur = _duration(self.video) if self.video.exists() else 0.0
-            parts.append(_bubble(f"🎬 <b>{html.escape(self.video.name)}</b><br><span style='color:#dfe9fa;"
-                                 f"font-size:12px'>{dur:.0f} s · video input</span>", user=True))
-        if self.prompt_sent:
-            parts.append(_bubble(html.escape(self.prompt_sent), user=True))
-        gen_by = {f"gen{g['n']}": g for g in gens}
-        failed = False
-        for k in ORDER:
-            s = stages.get(k)
-            if k in gen_by:
-                g = gen_by[k]
-                parts.append(_bubble(f"<b>Gen {g['n']} · {html.escape(g['title'])}</b><br>"
-                                     f"<span style='color:{INK2}'>{html.escape(g['headline'])}</span> "
-                                     f"<span style='color:{OK}'>→ on screen</span>"))
-            elif s is not None and s["status"] in ("ok", "failed", "refused"):
-                bad = s["status"] != "ok"
-                failed |= bad
-                txt = s.get("error") if bad else s.get("headline")
-                parts.append(_bubble(f"<b>{SAY.get(k, k)}</b><br><span style='color:{BAD if bad else INK2}'>"
-                                     f"{html.escape((txt or '')[:220])}</span>"))
-        running = next((k for k in ORDER if st.get(k) == "running"), None)
-        if running and not failed and self._alive():
-            s = stages.get(running)
-            label = SAY[running]
-            secs = ""
-            if s and s.get("t0"):
-                try:
-                    from datetime import datetime
-                    secs = f" · {time.time() - datetime.fromisoformat(s['t0']).timestamp():.0f} s"
-                except ValueError:
-                    pass
-            parts.append(_bubble(f"<span style='color:{INK2}'>⋯ {label}{secs}</span>"))
-        if st.get("replay_critic") == "ok" and 3 in {g["n"] for g in gens}:
-            parts.append(_bubble(f"<span style='color:{OK}'>✓ Simulation ready.</span> Orbit, pan and zoom the world; "
-                                 "it replays the demonstrated task in MuJoCo physics."))
-        elif self.run_dir is not None and not self._alive() and not failed and self.launched:
-            parts.append(_bubble(f"<span style='color:{BAD}'>The pipeline stopped; see .worldgym/demo_{self.name}.log"
-                                 f"</span>"))
-        if not parts:
-            parts.append(_bubble("Upload a robot video and tell me what to build. I'll turn it into a MuJoCo "
-                                 "world you can replay."))
-        body = ('<div style="display:flex;flex-direction:column;gap:7px;max-height:44vh;overflow-y:auto;'
-                'padding:2px 0 8px">' + "".join(parts) + "</div>")
-        if body != self.chat_sig:
-            self.chat_sig = body
-            self.chat.content = body
         self._progress(st)
-
-    def _alive(self) -> bool:
-        if self.proc is not None:
-            return self.proc.poll() is None
-        m = self._manifest() if self.run_dir is not None else None   # attached run (--run): judge by its stages
-        return any(s["status"] == "running" for s in (m or {}).get("stages", []))
+        self._live_line(st, stages, gens)
+        self._gens_ui(gens)
+        self._scene(stages, gens)
+        if self.go.disabled and self.video is not None and not self._alive():
+            self.go.disabled = False
 
     def _progress(self, st: dict) -> None:
         rows = []
@@ -263,108 +225,139 @@ class Demo:
                 icon, col = "○", INK2
             rows.append(f'<div style="display:flex;gap:10px;align-items:center;padding:3px 0;font-size:14px;color:{INK}">'
                         f'<span style="color:{col};width:16px;text-align:center;font-weight:700">{icon}</span>{label}</div>')
-        html_rows = '<div style="padding:6px 0 2px">' + "".join(rows) + "</div>"
-        if self.steps.content != html_rows:
-            self.steps.content = html_rows
+        _set(self.steps, '<div style="padding:8px 0 2px">' + "".join(rows) + "</div>")
         done = sum(st.get(m) == "ok" for m in ORDER) + 0.5 * sum(st.get(m) == "running" for m in ORDER)
         v = round(100.0 * done / len(ORDER), 1) if self.run_dir is not None else 0.0
         if abs(self.bar.value - v) > 0.05:
             self.bar.value = v
-        self.bar.animated = self._alive()
-        txt = (f'<div style="display:flex;justify-content:space-between;font-size:12px;color:{INK2}">'
-               f'<span>{"Working…" if self._alive() else ("Done" if v >= 99.9 else "Progress")}</span><span>{v:.0f}%</span></div>')
-        if self.pct.content != txt:
-            self.pct.content = txt
-        if self.go.disabled and not self._alive():
-            self.go.disabled = False
+        anim = self._alive()
+        if self.bar.animated != anim:
+            self.bar.animated = anim
+        _set(self.pct, f'<div style="display:flex;justify-content:space-between;font-size:12px;color:{INK2}">'
+                       f'<span>Progress</span><span>{v:.0f}%</span></div>')
+
+    def _live_line(self, st: dict, stages: dict, gens: list[dict]) -> None:
+        """One status line, replaced as the run moves on (no log)."""
+        bad = next((s for s in stages.values() if s["status"] in ("failed", "refused")), None)
+        if bad is not None:
+            msg, col = f"Stopped: {(bad.get('error') or bad['status'])[:160]}", BAD
+        elif self._alive():
+            k = next((k for k in ORDER if st.get(k) == "running"), None)
+            msg, col = (DOING.get(k, "Working") if k else "Starting the pipeline") + "…", INK
+            s = stages.get(k) if k else None
+            if s and s.get("t0"):
+                try:
+                    msg += f" {time.time() - datetime.fromisoformat(s['t0']).timestamp():.0f} s"
+                except ValueError:
+                    pass
+        elif gens and st.get("replay_critic") == "ok":
+            msg, col = "Simulation ready. Pick a generation and run it.", OK
+        elif gens:
+            msg, col = "Run ended early; the newest generation is shown.", INK2
+        elif self.video is not None:
+            msg, col = "Ready. Press Convert to sim.", INK2
+        else:
+            msg, col = "Upload a robot video to begin.", INK2
+        _set(self.live, f'<div style="font-size:13px;color:{col};padding:6px 0 2px;min-height:20px">{html.escape(msg)}</div>')
+
+    def _gens_ui(self, gens: list[dict]) -> None:
+        if not gens:
+            return
+        opts = tuple(f"Gen {g['n']} · {g['title']}" for g in gens)
+        if tuple(self.gen_dd.options) != opts:
+            self.gen_dd.options = opts
+            self.gen_dd.visible = True
+            if self.follow and not self.running:
+                self.gen_dd.value = opts[-1]
+        g = self._selected(gens)
+        self.run_btn.visible = True
+        runnable = bool(g and g.get("replay")) and not self.running
+        if self.run_btn.disabled == runnable:
+            self.run_btn.disabled = not runnable
+        sub = (self.result or (html.escape(g["headline"]) if g else "")) if not self.running else "Running in MuJoCo…"
+        if g and not g.get("replay"):
+            sub = "This generation has no motion yet; the next one will."
+        _set(self.note, f'<div style="font-size:12px;color:{INK2};padding-top:4px">{sub}</div>')
+
+    def _selected(self, gens: list[dict]) -> dict | None:
+        return next((g for g in gens if self.gen_dd.value.startswith(f"Gen {g['n']} ")), gens[-1] if gens else None)
+
+    def _pick_gen(self) -> None:
+        opts = tuple(self.gen_dd.options)
+        self.follow = bool(opts) and self.gen_dd.value == opts[-1]
+        self.result = ""
 
     # ------------------------------------------------------------------------------------------------------------------
-    def refresh_scene(self) -> None:
-        if self.run_dir is None:
+    def _scene(self, stages: dict, gens: list[dict]) -> None:
+        if self.running or self.run_dir is None:
             return
-        st, stages, gens = self.status()
-        if gens:
-            opts = tuple(f"Gen {g['n']} · {g['title']}" for g in gens)
-            if tuple(self.gen_dd.options) != opts:
-                self.gen_dd.options = opts
-                self.gen_dd.visible = True
-                if self.follow:
-                    self.gen_dd.value = opts[-1]
-            pick = next((g for g in gens if self.gen_dd.value.startswith(f"Gen {g['n']} ")), gens[-1])
-            self._show_gen(pick)
+        g = self._selected(gens)
+        if g is not None:
+            d = self.run_dir / "gens" / f"gen{g['n']}"
+            key = f"{d}@{g['t']}"
+            if key != self.shown and not self.shown.startswith(f"ran:{d}@{g['t']}"):
+                try:
+                    sim = build_sim(TaskSpec.model_validate_json((d / "task.json").read_text()))
+                except Exception:  # noqa: BLE001 - still being written
+                    return
+                self._show(key, sim)
             return
         ob = stages.get("robot_onboard")
         if ob and ob["status"] == "ok" and ob.get("data", {}).get("adapter"):
             key = f"robot:{ob['data']['adapter']}"
             if key != self.shown:
-                sim = build_sim(TaskSpec(name="robot", robot=ob["data"]["adapter"], objects=[]))
-                self._load(key, static_replay(sim.m, sim.d), "the verified robot, before the world is built")
+                self._show(key, build_sim(TaskSpec(name="robot", robot=ob["data"]["adapter"], objects=[])))
 
-    def _show_gen(self, g: dict) -> None:
-        d = self.run_dir / "gens" / f"gen{g['n']}"
-        key = f"{d}@{g['t']}"
-        if key == self.shown:
-            return
-        try:
-            if g.get("replay") and (d / "nominal" / "telemetry.npz").exists():
-                rep = load_replay(d / "nominal")
-            else:
-                sim = build_sim(TaskSpec.model_validate_json((d / "task.json").read_text()))
-                rep = static_replay(sim.m, sim.d)
-        except Exception as e:  # noqa: BLE001 - files may still be being written
-            self.now.content = f'<div style="color:{INK2};font-size:12px">loading Gen {g["n"]}… ({type(e).__name__})</div>'
-            return
-        self._load(key, rep, f"Gen {g['n']} · {g['title']}")
-
-    def _load(self, key: str, rep: Replay, caption: str) -> None:
+    def _show(self, key: str, sim) -> None:
         with self.lock:
             first = not self.shown or (self.shown.startswith("robot:") and not key.startswith("robot:"))
-            self.shown, self.replay, self.t = key, rep, 0.0
-            self.mirror.load(rep.m)
-            self.mirror.update(rep.xpos[0], rep.xquat[0])
+            self.shown = key
+            self.mirror.load(sim.m)
+            self.mirror.update(sim.d.xpos, sim.d.xquat)
             if first:
-                frame_camera(self.server, rep)
-            self.play.visible = len(rep.t) > 1
-            self.caption = caption
-            self._caption(0)
+                frame_camera(self.server, sim.d.xpos)
 
-    def _caption(self, k: int) -> None:
-        rep = self.replay
-        if rep is None:
+    def run_sim(self) -> None:
+        g = self._selected(self._gens()) if self.run_dir is not None else None
+        if g is None or not g.get("replay") or self.running:
             return
-        tail = f" · t = {rep.t[k]:.1f} s · {html.escape(rep.phase[k] or '')}" if len(rep.t) > 1 else ""
-        self.now.content = (f'<div style="font-size:12px;color:{INK2};padding-top:4px">Showing <b style="color:{INK}">'
-                            f'{html.escape(self.caption)}</b>{tail}</div>')
+        d = self.run_dir / "gens" / f"gen{g['n']}"
+        task = TaskSpec.model_validate_json((d / "task.json").read_text())
+        policy = PolicyConfig.model_validate_json((d / "policy.json").read_text())
+        self.running, self.result = True, ""
+        self.run_btn.disabled = True
+        threading.Thread(target=self._run_worker, args=(task, policy, g, d), daemon=True).start()
 
-    def _pick_gen(self) -> None:
-        opts = tuple(self.gen_dd.options)
-        self.follow = bool(opts) and self.gen_dd.value == opts[-1]
+    def _run_worker(self, task: TaskSpec, policy: PolicyConfig, g: dict, d: Path) -> None:
+        clock: list[float] = []
 
-    def _toggle_play(self) -> None:
-        self.playing = not self.playing
-        self.play.label = "Pause replay" if self.playing else "Play replay"
-        self.play.icon = viser.Icon.PLAYER_PAUSE if self.playing else viser.Icon.PLAYER_PLAY
+        def on_frame(sim) -> None:
+            if not clock:
+                self.mirror.load(sim.m)
+                clock.append(time.perf_counter() - sim.d.time)
+            self.mirror.update(sim.d.xpos, sim.d.xquat)
+            lag = clock[0] + sim.d.time - time.perf_counter()
+            if lag > 0:
+                time.sleep(lag)
 
-    def _player(self) -> None:
-        last_cap = 0.0
-        while True:
-            time.sleep(1.0 / FPS)
-            rep = self.replay
-            if rep is None or len(rep.t) < 2 or not self.playing:
-                continue
-            with self.lock:
-                self.t = self.t + 1.0 / FPS
-                if self.t > rep.t[-1] + 1.0:   # hold the last frame for a second, then loop
-                    self.t = 0.0
-                k = rep.index(min(self.t, float(rep.t[-1])))
-                self.mirror.update(rep.xpos[k], rep.xquat[k])
-                if time.time() - last_cap > 0.25:
-                    last_cap = time.time()
-                    self._caption(k)
+        t0 = time.perf_counter()
+        try:
+            run_episode(task, policy, on_frame=on_frame)
+            self.result = f"Gen {g['n']} ran the demonstrated task in MuJoCo ({time.perf_counter() - t0:.0f} s)."
+        except Exception as e:  # noqa: BLE001 - report, keep the server alive
+            self.result = f"run failed: {type(e).__name__}: {str(e)[:120]}"
+        finally:
+            self.shown = f"ran:{d}@{g['t']}"   # keep the final state on screen until another generation is picked
+            self.running = False
 
 
-def frame_camera(server: viser.ViserServer, rep: Replay) -> None:
-    p = rep.xpos[0][1:]
+def _set(handle, content: str) -> None:
+    if handle.content != content:
+        handle.content = content
+
+
+def frame_camera(server: viser.ViserServer, xpos: np.ndarray) -> None:
+    p = xpos[1:]
     lo, hi = p.min(0), p.max(0)
     look = (lo + hi) / 2
     look[2] = max(lo[2], FLOOR_Z) + 0.1
@@ -379,7 +372,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="WorldGym demo")
     ap.add_argument("--port", type=int, default=8090)
     ap.add_argument("--host", default="0.0.0.0")
-    ap.add_argument("--video", type=Path, help="pre-attach a clip (the user still presses Convert)")
+    ap.add_argument("--video", type=Path, help="pre-attach a clip (Convert still has to be pressed)")
     ap.add_argument("--run", type=Path, help="show an existing run instead of starting one")
     ap.add_argument("--cached", action="store_true", help="let Argon reuse cached responses (rehearsals only)")
     a = ap.parse_args()
@@ -403,8 +396,7 @@ def main() -> None:
         while True:
             try:
                 demo._find_run()
-                demo.render_chat()
-                demo.refresh_scene()
+                demo.refresh()
             except Exception as e:  # noqa: BLE001 - a bad poll must not kill the server
                 print(f"[demo] poll: {type(e).__name__}: {e}", flush=True)
             time.sleep(1.0)
