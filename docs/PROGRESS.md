@@ -34,6 +34,8 @@ cp .env.example .env             # add GEMINI_API_KEY
 | 12 | Video Architect on a real clip | done | 36 s handheld dual-arm wiping clip: 1 call, 142 s, ~$0.11, valid JSON first try |
 | 13 | Camera solve from the robot silhouette | done | synthetic: IoU 0.962, camera position error 0.52 cm |
 | 14 | 4-view diagnostic matrix + Loop 1 | done (analytic), Twin Critic wired | displaced twin 47.5 % → 98.3 % alignment in 1 iteration, xy error ≤ 1.1 mm |
+| 15 | Motion extraction + Replay Critic | done | synthetic: carry waypoints 3.0 mm median from ground truth; Draft 1 replays successfully |
+| 16 | Live Managed Agents | done | smoke test 34 s; live swarm agent: 24 sandbox rollouts in 10 min, 6 failing scenarios with a mechanism |
 
 ## Agent architecture (video → sim)
 
@@ -112,6 +114,18 @@ uv run pytest -q
   lines, collision wireframe. Loop 1: metrics per spec, analytic footprint patch (xy, yaw, extents) then the Twin
   Critic (Argon, multi-turn) returning a validated ScenePatch. Camera solve from the robot silhouette landed
   (grid + Levenberg-Marquardt + Powell; IoU 0.962, 0.52 cm).
+- **13:08** First live end-to-end run on the synthetic clip. Video Architect: Franka Emika Panda, 4 objects,
+  13 phases (156 s). Camera solve from Argon's robot box + GrabCut: silhouette IoU 0.98, fovy 48.9° vs 48.0°, position
+  error 3.0 cm. Scene Author: every object, role and predicate right (barrier = obstacle, bin = fixed container,
+  inside_container x2). Twin Critic iteration 1, reading the views: "the barrier is too thick because its footprint
+  included the perspective projection of its height" and corrected it to 2.4 cm (truth 2.0 cm) at 8 mm from the true
+  position. Iteration 2 hit a server 400 (malformed JSON); the adapter now retries with the server's message and
+  Loop 1 keeps the measured twin if a critique fails. Replay Critic added: real | sim side by side, aligned at the
+  first grasp; on the synthetic clip it shows the extracted speed lagging the demonstration.
+- **13:08** Live Antigravity swarm agent (barrier clearance, v3 policy): installed the repo in its sandbox, ran 24
+  rollouts through `core.bench`, and reported a mechanism the state-conditioned heights miss: grasping the cylinder
+  with a fixed 90° yaw turns the ~10 cm hand housing toward the barrier, so with the cylinder within ~4 cm of a
+  >= 12 cm barrier the hand strikes its top during descend_grasp (~250 N). 10 min, 1.34M input tokens.
 
 ## Lessons (API quirks found today)
 
