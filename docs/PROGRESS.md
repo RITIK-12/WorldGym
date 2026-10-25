@@ -22,6 +22,10 @@ cp .env.example .env             # add GEMINI_API_KEY
 | 0 | Repo, env, deps, Menagerie | done | mujoco 3.17, google-genai 2.33 |
 | 1 | Sim core: compiler, controller, policy DSL, telemetry, rollout | done | reference pick-place 2/2 in bin, TCP lag p99 1.9 mm, 15.7 s sim in 2.7 s wall |
 | 2 | Locked evaluator | done, locked | 10 referee tests; sha256 `d6e94519…` |
+| 3 | Run registry + model adapter (gemini / replay / manual) | done | manifest per run, request bundles |
+| 4 | Video QA gate | done | synthetic tripod clip: static 97 %, accepted; handheld / exposure-drift clips refused |
+| 5 | Robot onboarding + self-test | done | Panda 5/5 checks (IK grid max err 0.09 mm, 0.1 kg box lifted 0.218 m) |
+| 6 | Video Architect (Argon) | code done | awaiting GEMINI_API_KEY for the first live call |
 
 ## How to run
 
@@ -39,3 +43,9 @@ uv run pytest -q
   Reference task `panda_sort` (cube + cylinder into a bin past a barrier) succeeds with zero unwanted contacts and is
   bit-identical across runs and with/without video. Evaluator tested (placed / outside / tilted / yawed cylinder /
   on-top-of / obstacle displacement / rest) and locked.
+- **12:15** Run registry (`runs/<id>/manifest.json`, stages pending/running/ok/failed/refused) and one model adapter
+  with three backends: live Interactions API in background mode, replay of cached responses, and manual bundles.
+- **12:25** Video QA gate (ORB homography camera-motion check that ignores a large moving robot, exposure, blur,
+  motion-energy keyframes), Video Architect prompt + schema, robot onboarding with a 5-check self-test, and a
+  synthetic 1280x720 robot clip with full ground truth (`demo/synthetic_panda_sort.*`) as the oracle for the camera
+  solve, Loop 1 and motion extraction.

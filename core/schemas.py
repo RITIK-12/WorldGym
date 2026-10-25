@@ -194,6 +194,8 @@ class RobotGuess(Strict):
     make_model_guess: str
     arms: int = 1
     gripper: str = "parallel_jaw"
+    menagerie_dir: str | None = None       # closest MuJoCo Menagerie directory
+    confidence: float | None = None
 
 
 class VUObject(Strict):
@@ -205,14 +207,14 @@ class VUObject(Strict):
 
 class GripperLabel(Strict):
     arm: str = "arm"
-    uv: list[float] | None = None          # fingertip pixel (normalised 0..1000 or px; see video_architect)
+    uv: list[float] | None = None          # fingertip point [y, x] normalised 0..1000 (Gemini convention)
     open: bool = True
     held: str | None = None
 
 
 class Keyframe(Strict):
     t: float
-    robot_box: list[float] | None = None   # [ymin, xmin, ymax, xmax] normalised 0..1000
+    robot_box: list[float] | None = None   # [ymin, xmin, ymax, xmax] normalised 0..1000 (Gemini convention)
     object_boxes: dict[str, list[float]] = {}
     gripper: list[GripperLabel] = []
 

@@ -267,7 +267,9 @@ def _append_world(root: ET.Element, task: TaskSpec) -> None:
                                    rgba=_fmt(o.colour), density=f"{density:.6g}",
                                    friction=f"{o.friction:.4g} 0.005 0.0001", **OBJ_SOLVER))
 
-    for c in (task.cameras or DEFAULT_CAMERAS):
+    named = {c.name: c for c in DEFAULT_CAMERAS}
+    named.update({c.name: c for c in task.cameras})  # task cameras override defaults by name
+    for c in named.values():
         xy = c.xyaxes or look_at_xyaxes(c.pos, c.look_at or [0.45, 0, 0])
         attrs = dict(name=c.name, pos=_fmt(c.pos), xyaxes=_fmt(xy), fovy=f"{c.fovy:.6g}")
         if c.projection == "orthographic":
