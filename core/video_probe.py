@@ -169,7 +169,8 @@ def _plot(path: Path, t: np.ndarray, residual: np.ndarray, moving: np.ndarray, k
 # ----------------------------------------------------------------------------------------------------------------------
 
 def _rejected(reason: str, warnings: list[str] | None = None) -> dict:
-    return {"accepted": False, "reasons": [reason], "warnings": warnings or [], "headline": f"rejected: {reason}",
+    return {"accepted": False, "moving_camera_ok": False, "reasons": [reason], "warnings": warnings or [],
+            "headline": f"rejected: {reason}",
             "duration_s": 0.0, "fps": 0.0, "width": 0, "height": 0, "n_samples": 0, "static_fraction": None,
             "brightness_range": None, "blur_low_fraction": None, "aruco_detect_fraction": None, "keyframes_t": [],
             "trim": None, "curve": {"t": [], "shift_px": [], "residual": [], "blur": [], "brightness": []}}
@@ -248,7 +249,11 @@ def _verdict(samples: list[dict], pairs: list[tuple[float, float]], fps: float, 
         warnings.append(f"resolution below 720p ({w}x{h})")
 
     headline = f"static {(static or 0.0) * 100:.0f} %, {duration:.1f} s, {w}x{h}"
-    return {"accepted": not reasons, "reasons": reasons, "warnings": warnings, "headline": headline,
+    # A handheld clip can still be used: the camera is then tracked frame by frame (moving-camera mode).
+    soft = [r for r in reasons if r.startswith(("camera moves", "exposure drift"))]
+    moving = bool(soft) and len(soft) == len(reasons)
+    return {"accepted": not reasons, "moving_camera_ok": moving, "reasons": reasons, "warnings": warnings,
+            "headline": headline,
             "duration_s": round(duration, 2), "fps": round(fps, 3), "width": int(w), "height": int(h),
             "n_samples": len(samples), "static_fraction": None if static is None else round(static, 3),
             "brightness_range": round(b_range, 1), "blur_low_fraction": round(blur_low, 3),
