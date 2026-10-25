@@ -3,9 +3,14 @@
 Built at the Gemini 4 Argon SF Hackathon, 25 Oct 2026 (build window 10:30–17:00 PT).
 Everything in this repository was written today.
 
-**What it is.** One video of a robot doing a tabletop task goes in. Out come a MuJoCo twin of the scene with a
-fidelity score, a replay of the demonstrated motion, a perturbation benchmark with a locked held-out suite, and a
-policy hardened by Gemini 4 Argon critique and Antigravity Managed Agents, with a number at every step.
+**What it is.** One video of a robot doing a tabletop task goes in; a MuJoCo world that replays the task comes out.
+Gemini 4 Argon understands the clip, a parallel swarm of spatial labellers annotates it, Argon builds the scene
+(fetching NVIDIA SimReady assets on the fly when one matches), then renders what it built, watches it next to the
+real video, critiques it and fixes it in a loop (problem statement 2). Results appear as generations, so the
+viewer always has a world on screen while the next one is being critiqued.
+
+The policy half (perturbation benchmark with a locked held-out suite, Loop 2 skill critic, Loop 3 Antigravity
+swarm) is built and was exercised on the synthetic clip; it is not part of the live demo.
 
 ## Quick start
 
@@ -44,6 +49,8 @@ cp .env.example .env             # add GEMINI_API_KEY
 | 22 | Moving camera (handheld) | done | synthetic orbit ≤ 0.5 mm; real clip: metric table grid tracks the mat over 3-33 s |
 | 23 | Multi-arm motion extraction | done | synthetic labels: hold at -0.158 m (truth -0.16), 4 strokes (truth 4), replay succeeds |
 | 24 | NVIDIA SimReady assets as a Scene Author tool | done | search → fetch → USD convert → mesh object; wipe with a SimReady sponge succeeds |
+| 25 | Demo UI (single UI, port 8080) | done | upload + clip preview → convert; checklist, progress, one live status line; Run simulation per generation |
+| 26 | Three generations | done | Gen 1 from the Video Architect (layout + SimReady via tool), Gen 2 measured + swarm motion, Gen 3 four-view critic |
 
 ## Agent architecture (video → sim)
 
@@ -53,13 +60,14 @@ a numeric verification signal it is judged by (never another model's opinion).
 
 | Agent | Model | Watches | Produces | Verified by |
 |---|---|---|---|---|
-| Video Architect | gemini-4-argon, high | full clip + keyframes in one context | robot, objects, phases, keyframes, rest frame | downstream fits |
+| Video Architect | gemini-4-argon, high, + SimReady search tool | full clip + keyframes in one context | robot, every object with its SimReady asset, robot-frame position, long axis, role; phases; keyframes | Gen 1 runs; Gen 2 measurements |
 | Spatial labellers (parallel) | gemini-robotics-er-2-preview | frame batches | per-frame boxes, fingertip points, open/held | track consistency |
 | Robot onboarding | Argon / Antigravity agent | Menagerie MJCF summary | RobotAdapter | 5-check self-test |
 | Camera solver | numeric (render-and-compare) | robot silhouette at rest | camera pose + fovy, metric scale | silhouette IoU |
-| Scene Author | Argon, high | rest frame + masks + back-projected positions | TaskSpec (primitives / composites) | static fidelity |
+| Scene Author (Studio flow) | Argon, high | rest frame + masks + back-projected positions | TaskSpec (primitives / composites) | static fidelity |
 | **Twin Critic — Loop 1** | Argon, high, multi-turn | **4-view matrix**: ghost overlay, ortho top 5 cm grid, ground view, collision wireframe | ScenePatch | per-object IoU / offset / alignment |
 | Replay Critic | Argon, high | real clip vs synced sim replay | waypoint / timing patch | end-pose error, event timing |
+| **Four-view critic — Gen 3** | Argon, high | original clip + 4-view video of the Gen 2 run (ghost, top, ground, wire) | scene edits + DSL patch | replay success, end-pose error |
 | Skill Critic — Loop 2 | Argon, high | failing rollout video + event frames + fact trace | PolicyPatch | dev suite, held-out once |
 | Adversarial swarm — Loop 3 | Antigravity Managed Agents (parallel) | perturbation ranges + bench CLI | least-extreme failing scenarios | rollouts in sandbox |
 | Hardener | Argon, high | swarm reports | state-conditioned policy | dev + adversarial + held-out |
@@ -68,26 +76,27 @@ a numeric verification signal it is judged by (never another model's opinion).
 The Twin Critic keeps server-side state across iterations (`previous_interaction_id`), so each critique sees what it
 already tried; independent critiques (per object / per view / per hypothesis) run in parallel.
 
-## Demo runbook (3 minutes)
+## Demo runbook (live)
 
 ```bash
-uv run python -m app.studio --port 8080                                 # open http://localhost:8080
-uv run python -m core.pipeline --video demo/synthetic_panda_sort.mp4 \
-    --prompt "Put the red cube and the blue cylinder into the grey bin without knocking over the yellow barrier."
-uv run python -m core.pipeline --video <handheld clip> --prompt "Wipe the steel bar with the sponge." --swarm antigravity
-WORLDGYM_LLM=replay uv run python -m core.pipeline ...                  # offline fallback from cached responses
+uv run python -m app.demo                        # the one UI: open http://localhost:8080
 ```
 
-Story mode (one picture, one sentence, one number per step):
-1. **Input**: the clip + prompt; QA verdict (handheld clips enter moving-camera mode).
-2. **Argon builds the twin**: Video Architect → label review → robot identity by rendered candidates → self-test.
-3. **Real ↔ Sim**: robot-silhouette camera solve, tracked metric grid, 4-view matrix per Twin Critic iteration,
-   alignment %.
-4. **Replay reproduces the video**: Draft 1 extracted from the labels, real | sim side by side, end-pose error.
-5. **The benchmark breaks it**: dev + locked held-out (sha256) success.
-6. **Critique and repair**: Argon's timestamped critique and the parameter diff.
-7. **Held-out ratchet**: Draft 1 → 2 → 3, with the Antigravity swarm's adversarial scenarios.
-8. **Your turn**: move objects / raise obstacles and run the policy live.
+1. **Upload video** (any tabletop robot clip); a preview of the clip plays in the sidebar. Press **Convert to sim**.
+   The run is live: Argon's response cache is off (`WORLDGYM_CACHE=0`); `--cached` is for rehearsals only.
+2. The sidebar shows a four-step checklist (Video understood · Assets matched · World constructed · Refining
+   simulation), a progress bar and one live status line that is replaced as the run moves on.
+3. The 3D view starts empty, shows the verified robot, then each generation as it lands. Every generation is a
+   world plus the demonstrated motion; **Run simulation** plays it live in MuJoCo physics, in real time.
+   - **Gen 1 · First world**: built from the Video Architect alone: every object with its SimReady asset (picked
+     by Argon through the search tool while it watched the clip), its robot-frame position and long-axis
+     alignment, and the phases turned into primitives (hold / wipe / pick_place). No extra model call.
+   - **Gen 2 · Measured world + swarm motion**: the camera is solved from the robot's silhouette, objects move to
+     their measured footprints, and the motion is re-extracted from the parallel labelling swarm.
+   - **Gen 3 · Refined by the four-view critic**: Argon watches the original clip next to a four-view video of
+     the Gen 2 run (ghost overlay, ortho top with 5 cm grid, ground view, collision wireframe) and returns scene
+     edits plus a DSL patch; the patch is kept only when the replay improves.
+4. `uv run python -m app.demo --run runs/<id>` reopens a finished run.
 
 ## Runaway-loop guard (not a spend limit)
 
@@ -211,3 +220,5 @@ uv run pytest -q
   model; with the rest-pose frame (white link shells visible) Argon picked the i2rt YAM.
 - Function calling: the interaction stops with `requires_action` and `function_call` steps; answering with
   `function_result` steps and `previous_interaction_id` continues the same chain. Results may include images.
+- A text-only follow-up chained onto an image call (`previous_interaction_id`) inherits the images, so it must also
+  run synchronously; in background mode the server routes it to the `-agent` variant and rejects image input.
