@@ -50,6 +50,7 @@ def _grabcut(img_bgr: np.ndarray, region: np.ndarray, iters: int, rect_mode: boo
     crop = _as_bgr8(img_bgr[cy0:cy1, cx0:cx1])
     gc = np.where(region[cy0:cy1, cx0:cx1], cv2.GC_PR_FGD, cv2.GC_BGD).astype(np.uint8)
     bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
+    cv2.setRNGSeed(0)  # GrabCut's k-means init uses OpenCV's global RNG: seed it so masks are reproducible
     try:
         cv2.grabCut(crop, gc, (x0 - cx0, y0 - cy0, x1 - x0, y1 - y0), bgd, fgd, iters,
                     cv2.GC_INIT_WITH_RECT if rect_mode else cv2.GC_INIT_WITH_MASK)
