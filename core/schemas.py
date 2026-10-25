@@ -43,6 +43,7 @@ class ArmSpec(Strict):
     home_qpos: list[float]
     rest_qpos: list[float] | None = None   # pose the robot sits in when idle (camera calibration); default home_qpos
     vel_limits: list[float]
+    servo_damping: float | None = None     # kv = servo_damping * kp for undamped position servos (opt-in)
     robot_bodies: list[str]
     finger_bodies: list[str]
 

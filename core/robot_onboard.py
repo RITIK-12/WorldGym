@@ -83,22 +83,33 @@ def _empty_task(adapter: RobotAdapter, objects=(), preds=()) -> TaskSpec:
                     immutable_success_predicates=list(preds))
 
 
-def reach_workspace(m: mujoco.MjModel, ctrl: ArmController, n: int = 6000, seed: int = 0) -> dict:
-    """Workspace grid scaled to the arm: sample joint configurations, keep those with the TCP pointing down at a
-    table-top height, and use the 90th percentile of their horizontal reach (a Panda gives roughly x 0.3-0.6 m)."""
+def arm_base(m: mujoco.MjModel, d: mujoco.MjData, arm) -> tuple[np.ndarray, float]:
+    """Position and yaw of an arm's own base link (the parent of its first joint)."""
+    first = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, arm.joints[0])
+    b = m.body_parentid[m.jnt_bodyid[first]]
+    R = d.xmat[b].reshape(3, 3)
+    return d.xpos[b].copy(), float(np.arctan2(R[1, 0], R[0, 0]))
+
+
+def reach_workspace(m: mujoco.MjModel, ctrl: ArmController, base: np.ndarray, n: int = 6000, seed: int = 0) -> dict:
+    """Workspace grid scaled to the arm, in its base frame: sample joint configurations, keep those with the TCP
+    pointing down at a table-top height, and use the 90th percentile of their horizontal reach (a Panda gives roughly
+    x 0.3-0.6 m) and the median height reached pointing down inside that band (capped at 0.30 m)."""
     rng = np.random.default_rng(seed)
-    base = ctrl.scratch.xpos[m.body_rootid[m.site_bodyid[ctrl.site]]].copy()
     reach = []
     saved = ctrl.q_cmd.copy()
     for _ in range(n):
         ctrl.q_cmd = rng.uniform(ctrl.lo, ctrl.hi)
         p, R = ctrl.cmd_pose()
         if R[2, 2] < -0.9 and 0.02 <= p[2] <= 0.30:
-            reach.append(float(np.linalg.norm(p[:2] - base[:2])))
+            reach.append((float(np.linalg.norm(p[:2] - base[:2])), float(p[2])))
     ctrl.q_cmd = saved
-    r = float(np.percentile(reach, 90)) if len(reach) >= 20 else 0.6
-    return {"x": [round(max(0.15, 0.4 * r), 3), round(0.75 * r, 3)], "y": round(0.3 * r, 3), "z": [0.02, 0.15, 0.30],
-            "reach_m": round(r, 3), "n_downward_samples": len(reach)}
+    r = float(np.percentile([h for h, _ in reach], 90)) if len(reach) >= 20 else 0.6
+    near = [z for h, z in reach if 0.4 * r <= h <= 0.75 * r]
+    ztop = float(np.clip(np.percentile(near, 50), 0.10, 0.30)) if len(near) >= 10 else 0.30
+    return {"x": [round(max(0.15, 0.4 * r), 3), round(0.75 * r, 3)], "y": round(0.3 * r, 3),
+            "z": [0.02, round((0.02 + ztop) / 2, 3), round(ztop, 3)], "reach_m": round(r, 3),
+            "n_downward_samples": len(reach)}
 
 
 def frame_diagnostics(m: mujoco.MjModel, d: mujoco.MjData, ctrl: ArmController, arm) -> dict:
@@ -122,39 +133,29 @@ def frame_diagnostics(m: mujoco.MjModel, d: mujoco.MjData, ctrl: ArmController, 
     return out
 
 
-def self_test(adapter: RobotAdapter) -> dict:
-    checks: dict[str, dict] = {}
-    try:
-        _, m = compile_scene(_empty_task(adapter), adapter)
-        checks["compiles"] = {"ok": True}
-    except Exception as e:  # noqa: BLE001
-        checks["compiles"] = {"ok": False, "error": str(e)[:500]}
-        return {"ok": False, "checks": checks}
+def _arm_checks(adapter: RobotAdapter, m: mujoco.MjModel, d: mujoco.MjData, arm) -> dict[str, dict]:
+    from core.rollout import run_episode  # local import: rollout imports this module's neighbours
 
-    d = mujoco.MjData(m)
-    arm = adapter.arms[0]
-    try:
-        ctrl = ArmController(m, d, arm)
-    except Exception as e:  # noqa: BLE001
-        checks["names"] = {"ok": False, "error": f"adapter names do not match the model: {e}"}
-        return {"ok": False, "checks": checks}
-    ctrl.set_joints(arm.home_qpos)
-    mujoco.mj_forward(m, d)
+    checks: dict[str, dict] = {}
+    ctrl = ArmController(m, d, arm)
     robot_b = {mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, b) for b in arm.robot_bodies}
     pen = [(mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, d.contact[i].geom1),
             mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, d.contact[i].geom2), round(float(d.contact[i].dist), 4))
            for i in range(d.ncon) if d.contact[i].dist < -0.001
            and (m.geom_bodyid[d.contact[i].geom1] in robot_b or m.geom_bodyid[d.contact[i].geom2] in robot_b)]
     checks["home_collision_free"] = {"ok": not pen, "penetrations": pen[:6]}
-
     checks["frames"] = {"ok": True, **frame_diagnostics(m, d, ctrl, arm)}
-    ws = reach_workspace(m, ctrl)
+
+    base, yaw = arm_base(m, d, arm)
+    c, s = np.cos(yaw), np.sin(yaw)
+    to_world = lambda x, y: base[:2] + np.array([c * x - s * y, s * x + c * y])  # noqa: E731
+    ws = reach_workspace(m, ctrl, base)
     errs, fails = [], []
     for z in ws["z"]:
         for x in np.linspace(*ws["x"], 5):
             for y in np.linspace(-ws["y"], ws["y"], 5):
                 ctrl.q_cmd = np.array(arm.home_qpos, float)
-                _, e = ctrl.solve_ik(np.array([x, y, z]), top_down_R(0.0, arm.closing_axis))
+                _, e = ctrl.solve_ik(np.array([*to_world(x, y), z]), top_down_R(yaw, arm.closing_axis))
                 errs.append(e)
                 if e >= IK_TOL_M:
                     fails.append([round(float(x), 3), round(float(y), 3), z, round(e * 1000, 1)])
@@ -163,30 +164,63 @@ def self_test(adapter: RobotAdapter) -> dict:
                          "n_fail": int((errs >= IK_TOL_M).sum()), "n": len(errs), "workspace": ws,
                          "worst": sorted(fails, key=lambda f: -f[3])[:5]}
 
-    from core.rollout import run_episode  # local import: rollout imports this module's neighbours
-
-    bx = round(float(np.mean(ws["x"])), 3)
-    box = ObjectSpec(id="probe_box", shape="box", dims_m=[0.04, 0.04, 0.04], xy=[bx, 0.0], mass=0.1, friction=0.9)
+    bx, by = (round(float(v), 3) for v in to_world(float(np.mean(ws["x"])), 0.0))
+    box = ObjectSpec(id="probe_box", shape="box", dims_m=[0.04, 0.04, 0.04], xy=[bx, by], yaw=yaw, mass=0.1,
+                     friction=0.9)
     pol = PolicyConfig(name="selftest", primitives=[Primitive(arm=arm.name, object_id="probe_box", target_id=None,
                                                               post_grasp_lift_z_m=0.24, transit_apex_z_m=0.24,
-                                                              pre_place_hover_z_m=0.24, place_xy_offset_m=[bx, 0.0],
+                                                              pre_place_hover_z_m=0.24, place_xy_offset_m=[bx, by],
                                                               release_drop_height_m=0.2)])
     try:
         box_task = _empty_task(adapter, [box])
         _, mb = compile_scene(box_task, adapter)
         ep = run_episode(box_task, pol, adapter, max_time=20)
-        a = ep.arrays
-        lifted = a["phase"] == "lift_clear"
-        z = a["qpos"][:, mb.jnt_qposadr[mujoco.mj_name2id(mb, mujoco.mjtObj.mjOBJ_JOINT, "probe_box_free")] + 2]
-        rise = float(z[lifted].max() - z[0]) if lifted.any() else 0.0
+        z = ep.arrays["qpos"][:, mb.jnt_qposadr[mujoco.mj_name2id(mb, mujoco.mjtObj.mjOBJ_JOINT, "probe_box_free")] + 2]
+        rise = float(z.max() - z[0])
         checks["gripper_hold_lift"] = {"ok": rise > 0.18, "box_rise_m": round(rise, 3)}
         qadr = [mb.jnt_qposadr[mujoco.mj_name2id(mb, mujoco.mjtObj.mjOBJ_JOINT, j)] for j in arm.joints]
-        qv = np.diff(a["qpos"][:, qadr], axis=0) / mb.opt.timestep
+        qv = np.diff(ep.arrays["qpos"][:, qadr], axis=0) / mb.opt.timestep
         ratio = float((np.abs(qv) / np.array(arm.vel_limits)).max())
         checks["velocity_limits"] = {"ok": ratio <= 1.1, "max_ratio": round(ratio, 3)}
     except Exception as e:  # noqa: BLE001
         checks["gripper_hold_lift"] = {"ok": False, "error": str(e)[:500]}
+    return checks
+
+
+def self_test(adapter: RobotAdapter) -> dict:
+    """Every arm: home collision-free, frame diagnostics, IK grid in its base frame, gripper hold + lift, velocity
+    limits. Single-arm results are flat; with several arms each check aggregates `per_arm` details."""
+    checks: dict[str, dict] = {}
+    try:
+        _, m = compile_scene(_empty_task(adapter), adapter)
+        checks["compiles"] = {"ok": True}
+    except Exception as e:  # noqa: BLE001
+        checks["compiles"] = {"ok": False, "error": str(e)[:500]}
+        return {"ok": False, "checks": checks}
+    d = mujoco.MjData(m)
+    try:
+        ctrls = [ArmController(m, d, arm) for arm in adapter.arms]
+    except Exception as e:  # noqa: BLE001
+        checks["names"] = {"ok": False, "error": f"adapter names do not match the model: {e}"}
+        return {"ok": False, "checks": checks}
+    for arm, ctrl in zip(adapter.arms, ctrls):
+        ctrl.set_joints(arm.home_qpos)
+    mujoco.mj_forward(m, d)
+    per_arm = {arm.name: _arm_checks(adapter, m, d, arm) for arm in adapter.arms}
+    if len(per_arm) == 1:
+        checks.update(next(iter(per_arm.values())))
+    else:
+        for name in next(iter(per_arm.values())):
+            checks[name] = {"ok": all(pa.get(name, {"ok": False})["ok"] for pa in per_arm.values()),
+                            "per_arm": per_arm and {a: pa.get(name) for a, pa in per_arm.items()}}
     return {"ok": all(c["ok"] for c in checks.values()), "checks": checks}
+
+
+def set_rest_pose(sim) -> None:
+    """Put every arm at its rest pose (camera calibration frames show the robot idle)."""
+    for arm in sim.ix.adapter.arms:
+        sim.ctrls[arm.name].set_joints(arm.rest_qpos or arm.home_qpos)
+    mujoco.mj_forward(sim.m, sim.d)
 
 
 # ----------------------------------------------------------------------------------------------------------------------

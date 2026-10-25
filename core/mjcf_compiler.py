@@ -1,8 +1,9 @@
 """TaskSpec + RobotAdapter -> MJCF.
 
 The Menagerie robot XML is patched with ElementTree (not MjSpec) so the compiler does not depend on MuJoCo's
-editing API. Steps: absolute meshdir, gravcomp, TCP site, named collision geoms, force-controlled gripper, no keyframe,
-then table + objects + cameras + lights are appended.
+editing API. Steps: absolute meshdir, gravcomp, TCP site per arm, named collision geoms, force-controlled grippers,
+optional servo damping, no keyframe, then table + objects + cameras + lights are appended. One Menagerie XML may hold
+several arms (e.g. a bimanual model with `left/` and `right/` prefixes); every ArmSpec names its own bodies and joints.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from core.schemas import CameraSpec, ObjectSpec, Part, RobotAdapter, TaskSpec
+from core.schemas import ArmSpec, CameraSpec, ObjectSpec, Part, RobotAdapter, TableSpec, TaskSpec
 
 REPO = Path(__file__).resolve().parents[1]
 MENAGERIE = REPO / "assets" / "menagerie"
@@ -25,16 +26,28 @@ ROBOTS = REPO / "robots"
 TIMESTEP = 0.002
 PAD_CONTACT = dict(friction="1.5 0.02 0.0002", condim="4", solimp="0.95 0.99 0.001", solref="0.004 1")
 OBJ_SOLVER = dict(condim="4", solimp="0.95 0.99 0.001", solref="0.004 1")
-TABLE_SIZE = (0.55, 0.55, 0.02)
-TABLE_POS = (0.35, 0.0, -0.02)
 FLOOR_Z = -0.76
 
-DEFAULT_CAMERAS = [
+DEFAULT_CAMERAS = [  # for the default table (centre 0.35, 0); default_cameras() moves them with the table
     CameraSpec(name="front", pos=[1.45, 0.0, 0.75], look_at=[0.45, 0.0, 0.05], fovy=45),
     CameraSpec(name="side", pos=[0.45, -1.15, 0.45], look_at=[0.45, 0.0, 0.08], fovy=45),
     CameraSpec(name="top", pos=[0.45, 0.0, 1.5], xyaxes=[0, 1, 0, -1, 0, 0], fovy=0.9, projection="orthographic"),
     CameraSpec(name="ground", pos=[0.45, -1.3, 0.05], look_at=[0.45, 0.0, 0.05], fovy=30),
 ]
+_CAM_ORIGIN = TableSpec().center_xy
+
+
+def scene_table(task: TaskSpec, adapter: RobotAdapter | None = None) -> TableSpec:
+    return task.table or (adapter.table if adapter else None) or TableSpec()
+
+
+def default_cameras(table: TableSpec | None = None) -> list[CameraSpec]:
+    """DEFAULT_CAMERAS translated so they keep their pose relative to the table centre."""
+    dx, dy = (np.asarray((table or TableSpec()).center_xy, float) - _CAM_ORIGIN).tolist()
+    if dx == 0 and dy == 0:
+        return [c.model_copy() for c in DEFAULT_CAMERAS]
+    shift = lambda v: [v[0] + dx, v[1] + dy, *v[2:]] if v is not None else None  # noqa: E731
+    return [c.model_copy(update={"pos": shift(c.pos), "look_at": shift(c.look_at)}) for c in DEFAULT_CAMERAS]
 
 
 def load_adapter(robot_id: str) -> RobotAdapter:
@@ -193,6 +206,8 @@ def _patch_robot(adapter: RobotAdapter, base_pose: list[float]) -> ET.Element:
     for tag in ("keyframe",):
         for el in root.findall(tag):
             root.remove(el)
+    for el in root.findall("size"):
+        el.attrib.pop("nkey", None)
 
     wb = root.find("worldbody")
     for light in wb.findall("light"):
@@ -221,6 +236,14 @@ def _patch_robot(adapter: RobotAdapter, base_pose: list[float]) -> ET.Element:
                 act.set("biastype", "none")
                 act.set("ctrlrange", f"{-g.force_range} {g.force_range}")
                 act.set("forcerange", f"{-g.force_range} {g.force_range}")
+        if arm.servo_damping:
+            for act in root.iter():
+                if act.get("name") in arm.actuators and act.tag in ("position", "general") and act.get("kp", act.get("gainprm")):
+                    kp = float(act.get("kp") or act.get("gainprm").split()[0])
+                    if act.tag == "position":
+                        act.set("kv", f"{arm.servo_damping * kp:.6g}")
+                    else:
+                        act.set("biasprm", f"0 {-kp:.6g} {-arm.servo_damping * kp:.6g}")
         for j in root.iter("joint"):
             if j.get("name") in g.joints:
                 j.set("solreflimit", "0.004 1")
@@ -286,7 +309,7 @@ def _scene_globals(root: ET.Element) -> None:
     root.append(ET.Element("statistic", center="0.4 0 0.15", extent="0.9"))
 
 
-def _append_world(root: ET.Element, task: TaskSpec) -> None:
+def _append_world(root: ET.Element, task: TaskSpec, table: TableSpec) -> None:
     asset = root.find("asset")
     if asset is None:
         asset = ET.SubElement(root, "asset")
@@ -300,8 +323,10 @@ def _append_world(root: ET.Element, task: TaskSpec) -> None:
                          specular="0 0 0", castshadow="false"))
     wb.append(ET.Element("geom", name="floor", type="plane", size="3 3 0.05", pos=f"0 0 {FLOOR_Z}",
                          material="wg_floor_mat"))
-    wb.append(ET.Element("geom", name="table", type="box", size=_fmt(TABLE_SIZE), pos=_fmt(TABLE_POS),
-                         rgba="0.58 0.52 0.44 1", friction="0.8 0.005 0.0001"))
+    half = [table.size_xy[0] / 2, table.size_xy[1] / 2, table.thickness / 2]
+    wb.append(ET.Element("geom", name="table", type="box", size=_fmt(half),
+                         pos=_fmt([*table.center_xy, -table.thickness / 2]), rgba="0.58 0.52 0.44 1",
+                         friction="0.8 0.005 0.0001"))
 
     for o in task.objects:
         geoms = object_geoms(o)
@@ -318,10 +343,11 @@ def _append_world(root: ET.Element, task: TaskSpec) -> None:
                                    rgba=_fmt(o.colour), density=f"{density:.6g}",
                                    friction=f"{o.friction:.4g} 0.005 0.0001", **extra, **OBJ_SOLVER))
 
-    named = {c.name: c for c in DEFAULT_CAMERAS}
+    named = {c.name: c for c in default_cameras(table)}
     named.update({c.name: c for c in task.cameras})  # task cameras override defaults by name
+    centre = [table.center_xy[0] + 0.1, table.center_xy[1], 0.0]
     for c in named.values():
-        xy = c.xyaxes or look_at_xyaxes(c.pos, c.look_at or [0.45, 0, 0])
+        xy = c.xyaxes or look_at_xyaxes(c.pos, c.look_at or centre)
         attrs = dict(name=c.name, pos=_fmt(c.pos), xyaxes=_fmt(xy), fovy=f"{c.fovy:.6g}")
         if c.projection == "orthographic":
             attrs["projection"] = "orthographic"
@@ -334,7 +360,7 @@ def compile_scene(task: TaskSpec, adapter: RobotAdapter | None = None) -> tuple[
     root = _patch_robot(adapter, base_pose)
     root.set("model", f"worldgym_{task.name}")
     _scene_globals(root)
-    _append_world(root, task)
+    _append_world(root, task, scene_table(task, adapter))
     _name_robot_geoms(root, adapter)
     ET.indent(root)
     xml = ET.tostring(root, encoding="unicode")

@@ -1,0 +1,204 @@
+{
+ "robot_id": "trossen_wxai_biarm",
+ "menagerie_dir": "trossen_wxai",
+ "mjcf": "wxai_follower_biarm.xml",
+ "arms": [
+  {
+   "name": "left",
+   "joints": [
+    "left/joint_0",
+    "left/joint_1",
+    "left/joint_2",
+    "left/joint_3",
+    "left/joint_4",
+    "left/joint_5"
+   ],
+   "actuators": [
+    "left/joint_0",
+    "left/joint_1",
+    "left/joint_2",
+    "left/joint_3",
+    "left/joint_4",
+    "left/joint_5"
+   ],
+   "tcp": {
+    "body": "left/link_6",
+    "pos": [
+     0.148,
+     0.0,
+     0.0
+    ],
+    "quat": [
+     0.7071068,
+     0.0,
+     0.7071068,
+     0.0
+    ]
+   },
+   "closing_axis": "y",
+   "gripper": {
+    "kind": "joint_force",
+    "actuator": "left/right_carriage_joint",
+    "joints": [
+     "left/right_carriage_joint",
+     "left/left_carriage_joint"
+    ],
+    "max_width_m": 0.088,
+    "force_range": 35.0,
+    "finger_force_per_ctrl": 0.5
+   },
+   "home_qpos": [
+    0.0,
+    1.5,
+    1.4,
+    -1.47,
+    0.0,
+    0.0
+   ],
+   "rest_qpos": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "vel_limits": [
+    3.14,
+    3.14,
+    3.14,
+    3.14,
+    3.14,
+    3.14
+   ],
+   "servo_damping": 0.1,
+   "robot_bodies": [
+    "left/base_link",
+    "left/link_1",
+    "left/link_2",
+    "left/link_3",
+    "left/link_4",
+    "left/link_5",
+    "left/link_6",
+    "left/camera_mount_d405",
+    "left/camera_link",
+    "left/carriage_right",
+    "left/gripper_right",
+    "left/carriage_left",
+    "left/gripper_left"
+   ],
+   "finger_bodies": [
+    "left/gripper_right",
+    "left/gripper_left"
+   ]
+  },
+  {
+   "name": "right",
+   "joints": [
+    "right/joint_0",
+    "right/joint_1",
+    "right/joint_2",
+    "right/joint_3",
+    "right/joint_4",
+    "right/joint_5"
+   ],
+   "actuators": [
+    "right/joint_0",
+    "right/joint_1",
+    "right/joint_2",
+    "right/joint_3",
+    "right/joint_4",
+    "right/joint_5"
+   ],
+   "tcp": {
+    "body": "right/link_6",
+    "pos": [
+     0.148,
+     0.0,
+     0.0
+    ],
+    "quat": [
+     0.7071068,
+     0.0,
+     0.7071068,
+     0.0
+    ]
+   },
+   "closing_axis": "y",
+   "gripper": {
+    "kind": "joint_force",
+    "actuator": "right/right_carriage_joint",
+    "joints": [
+     "right/right_carriage_joint",
+     "right/left_carriage_joint"
+    ],
+    "max_width_m": 0.088,
+    "force_range": 35.0,
+    "finger_force_per_ctrl": 0.5
+   },
+   "home_qpos": [
+    0.0,
+    1.5,
+    1.4,
+    -1.47,
+    0.0,
+    0.0
+   ],
+   "rest_qpos": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "vel_limits": [
+    3.14,
+    3.14,
+    3.14,
+    3.14,
+    3.14,
+    3.14
+   ],
+   "servo_damping": 0.1,
+   "robot_bodies": [
+    "right/base_link",
+    "right/link_1",
+    "right/link_2",
+    "right/link_3",
+    "right/link_4",
+    "right/link_5",
+    "right/link_6",
+    "right/camera_mount_d405",
+    "right/camera_link",
+    "right/carriage_right",
+    "right/gripper_right",
+    "right/carriage_left",
+    "right/gripper_left"
+   ],
+   "finger_bodies": [
+    "right/gripper_right",
+    "right/gripper_left"
+   ]
+  }
+ ],
+ "base_poses": [
+  [
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ]
+ ],
+ "table": {
+  "center_xy": [
+   0.0,
+   0.05
+  ],
+  "size_xy": [
+   1.3,
+   0.8
+  ],
+  "thickness": 0.04
+ }
+}
