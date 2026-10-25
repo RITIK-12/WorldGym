@@ -352,12 +352,23 @@ def _append_world(root: ET.Element, task: TaskSpec, table: TableSpec) -> None:
                          friction="0.8 0.005 0.0001"))
 
     for o in task.objects:
-        geoms = object_geoms(o)
         h = object_height(o)
         cz = object_bottom_z(task, o) + h / 2 + 1e-4
         body = ET.SubElement(wb, "body", name=o.id, pos=_fmt([o.xy[0], o.xy[1], cz]), euler=f"0 0 {o.yaw:.6g}")
         if not o.is_fixed:
             body.append(ET.Element("freejoint", name=f"{o.id}_free"))
+        if o.shape == "mesh":
+            from core.assets import asset_mjcf, ensure_asset
+
+            info = ensure_asset(o.asset.name)
+            mesh_assets, mesh_geoms, _ = asset_mjcf(o.id, info, o.dims_m, o.colour, o.mass,
+                                                    dict(friction=f"{o.friction:.4g} 0.005 0.0001", **OBJ_SOLVER))
+            for el in mesh_assets:
+                asset.append(el)
+            for el in mesh_geoms:
+                body.append(el)
+            continue
+        geoms = object_geoms(o)
         vol = sum(_geom_volume(t, s) for _, t, s, _, _ in geoms)
         density = o.mass / vol
         for name, gtype, size, pos, euler in geoms:
