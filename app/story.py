@@ -212,6 +212,10 @@ def _step_twin(d: Path, m: RunManifest) -> Step:
         rows.append({"stage": name, "status": s.status, "seconds": secs, "headline": s.headline or s.error or ""})
     robot = ((va.data.get("robot") or {}).get("make_model_guess") if va else None) or "robot (not identified yet)"
     conf = (va.data.get("robot") or {}).get("confidence") if va else None
+    verify = (ob.data.get("verify") if ob else None) or {}
+    if verify.get("menagerie_dir") and verify["menagerie_dir"] != (va.data.get("robot") or {}).get("menagerie_dir"):
+        robot = f"{verify['menagerie_dir']} (visual check of rendered candidates overruled the first guess, {robot})"
+        conf = verify.get("confidence")
     n_obj = len(va.data.get("objects", [])) if va else 0
     n_ph = len(va.data.get("phases", [])) if va else 0
     done = va is not None and va.status == "ok"
