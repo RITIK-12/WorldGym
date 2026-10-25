@@ -1,11 +1,12 @@
 """WorldGym demo: upload a robot clip, press Convert, watch the MuJoCo world appear and run it.
 
-    .venv/bin/python -m app.demo [--port 8090] [--video clip.mp4] [--run runs/<id>] [--cached]
+    .venv/bin/python -m app.demo [--port 8080] [--video clip.mp4] [--run runs/<id>] [--cached]
 
 Sidebar: upload, a looping preview of the clip, Convert to sim, a four-step checklist with a progress bar and one
 live status line. Convert starts `core.pipeline --twin-only` with Argon's response cache off (WORLDGYM_CACHE=0)
 unless --cached. Results arrive as generations (runs/<id>/gens), each a world plus the demonstrated motion:
-Gen 1 the first world, Gen 2 after the 4-view Twin Critic, Gen 3 after the Replay Critic. "Run simulation" plays
+Gen 1 from Argon's understanding of the clip, Gen 2 with measured positions and the labelling swarm's
+motion, Gen 3 after Argon critiques the original against four views of the Gen 2 run. "Run simulation" plays
 the selected generation's policy live in MuJoCo physics, in real time.
 """
 from __future__ import annotations
@@ -41,20 +42,21 @@ SPIN = ('<style>@keyframes wgspin{to{transform:rotate(360deg)}}</style><span sty
 
 # (checklist label, milestones); a milestone is a pipeline stage or a published generation
 STEPS = [("Video understood", ("qa", "video_architect", "robot_onboard")),
-         ("Assets matched", ("camera_solve", "gen1")),
-         ("World constructed", ("loop1_static",)),
-         ("Refining simulation", ("motion_extract", "gen2", "replay_critic", "gen3"))]
+         ("Assets matched", ("first_world", "gen1")),
+         ("World constructed", ("camera_solve", "motion_extract", "gen2")),
+         ("Refining simulation", ("final_critic", "gen3"))]
 ORDER = [m for _, ms in STEPS for m in ms]
+GEN_STAGE = {1: "first_world", 2: "motion_extract", 3: "final_critic"}   # each generation is published in its stage
 DOING = {"qa": "Checking the clip",
-         "video_architect": "Argon is watching the video and segmenting the actions",
+         "video_architect": "Argon is watching the video: objects, layout, actions, SimReady assets",
          "robot_onboard": "Identifying the robot by comparing rendered candidates",
+         "first_world": "Building Gen 1 from Argon's understanding",
+         "gen1": "Building Gen 1 from Argon's understanding",
          "camera_solve": "Calibrating the camera from the robot's silhouette",
-         "gen1": "Building the first world (SimReady assets) and its motion",
-         "loop1_static": "Twin Critic is comparing four views of the twin with the video",
-         "motion_extract": "Re-extracting the motion on the corrected twin",
-         "gen2": "Re-extracting the motion on the corrected twin",
-         "replay_critic": "Replay Critic is watching real and sim side by side",
-         "gen3": "Replay Critic is watching real and sim side by side"}
+         "motion_extract": "Measuring the objects and extracting the motion from the labelling swarm",
+         "gen2": "Measuring the objects and extracting the motion from the labelling swarm",
+         "final_critic": "Argon is watching the original and four views of the simulation",
+         "gen3": "Argon is watching the original and four views of the simulation"}
 
 
 def preview_html(video: Path) -> str:
@@ -193,12 +195,8 @@ class Demo:
         gens = self._gens() if self.run_dir is not None else []
         st = {k: v["status"] for k, v in stages.items()}
         have = {g["n"] for g in gens}
-        # each generation is published inside its stage: gen1 at the start of loop1_static (Scene Author),
-        # gen2 at the end of motion_extract, gen3 at the end of replay_critic
-        for n, stage in ((1, "loop1_static"), (2, "motion_extract"), (3, "replay_critic")):
+        for n, stage in GEN_STAGE.items():
             st[f"gen{n}"] = "ok" if n in have else ("running" if st.get(stage) == "running" else "pending")
-        if st.get("loop1_static") == "running" and 1 not in have:
-            st["loop1_static"] = "pending"
         return st, stages, gens
 
     # ------------------------------------------------------------------------------------------------------------------
@@ -250,7 +248,7 @@ class Demo:
                     msg += f" {time.time() - datetime.fromisoformat(s['t0']).timestamp():.0f} s"
                 except ValueError:
                     pass
-        elif gens and st.get("replay_critic") == "ok":
+        elif gens and st.get("final_critic") == "ok":
             msg, col = "Simulation ready. Pick a generation and run it.", OK
         elif gens:
             msg, col = "Run ended early; the newest generation is shown.", INK2
@@ -370,7 +368,7 @@ def frame_camera(server: viser.ViserServer, xpos: np.ndarray) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="WorldGym demo")
-    ap.add_argument("--port", type=int, default=8090)
+    ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--video", type=Path, help="pre-attach a clip (Convert still has to be pressed)")
     ap.add_argument("--run", type=Path, help="show an existing run instead of starting one")

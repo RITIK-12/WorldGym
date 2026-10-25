@@ -2,28 +2,15 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "studio",
-      "runtimeExecutable": ".venv/bin/python",
-      "runtimeArgs": [
-        "-m",
-        "app.studio",
-        "--port",
-        "8080"
-      ],
-      "port": 8080
-    },
-    {
-      "name": "demo",
+      "name": "worldgym",
       "runtimeExecutable": ".venv/bin/python",
       "runtimeArgs": [
         "-m",
         "app.demo",
         "--port",
-        "8090",
-        "--video",
-        "docs/bar_real.mp4"
+        "8080"
       ],
-      "port": 8090
+      "port": 8080
     }
   ]
 }

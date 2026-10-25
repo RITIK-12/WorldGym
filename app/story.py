@@ -203,7 +203,7 @@ def _step_input(d: Path, m: RunManifest) -> Step:
 def _step_twin(d: Path, m: RunManifest) -> Step:
     va, ob = get_stage(m, "video_architect"), get_stage(m, "robot_onboard")
     rows, total, n_ok = [], 0.0, 0
-    for name in TWIN_STAGES:
+    for name in [*TWIN_STAGES, "loop1_static", "replay_critic"]:   # + stages of runs made before Gen 1/2/3
         s = get_stage(m, name)
         if s is None:
             continue

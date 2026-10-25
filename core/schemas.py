@@ -255,6 +255,13 @@ class VUObject(Strict):
     type: Shape | str
     colour: str
     size_guess_m: list[float]
+    # layout in the robot frame (+x forward from the base / the midpoint between the arm bases, +y the robot's left)
+    offset_m: list[float] | None = None    # [x, y] of the object's centre
+    long_axis: str = "none"                # "x" (front-back) | "y" (left-right) | "none"
+    fixed: bool = False                    # clamped / fixture: does not move during the video
+    placement: str = ""                    # where it is relative to the arms and the other objects
+    role: str = ""                         # its role in the demonstrated actions
+    asset: str | None = None               # NVIDIA SimReady asset name chosen with the search tool
 
 
 class GripperLabel(Strict):

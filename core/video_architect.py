@@ -98,10 +98,18 @@ Object shape vocabulary: {SHAPES}.
 
 Produce:
 - robot: make_model_guess, arms (1 or 2), gripper type, menagerie_dir (closest match from the list), confidence 0..1.
-- objects: every object the robot manipulates plus containers and obstacles on the table (not the table itself).
-  id = short snake_case with colour (e.g. red_cube, blue_cylinder, grey_bin, yellow_barrier). type from the
-  vocabulary. colour = a plain colour word. size_guess_m = FULL extents [x, y, z] in metres
-  (cylinder: [diameter, diameter, height]); use the robot's known size as the scale reference.
+- objects: every object the robot manipulates plus containers, fixtures and obstacles on the table (not the table
+  itself). Miss nothing the robot touches. id = short snake_case with colour (e.g. red_cube, white_sponge,
+  silver_bar). type from the vocabulary. colour = a plain colour word. size_guess_m = FULL extents [x, y, z] in the
+  robot frame, in metres (cylinder: [diameter, diameter, height]); use the robot's known size as the scale reference.
+  Layout, in the robot frame (for two arms the origin is the midpoint between the two arm bases):
+  offset_m = [x, y] of the object's centre at the start of the video; long_axis = "x" if its long side points
+  forward/back, "y" if it runs left-right (e.g. parallel to the line between two arm bases), "none" if it has no
+  long side; fixed = true when it is clamped or never moves; placement = one sentence of where it is relative to
+  the arms and the other objects; role = what it does in the task (e.g. "wiping tool held by the right arm",
+  "surface being wiped, held by the left arm").
+  asset: call search_simready_assets for each real product (sponge, cup, bottle, can, tool, box...) and set the name
+  of the candidate whose shape and size match; null when nothing matches (bars, custom fixtures, plain blocks).
 - phases: contiguous phases covering the task, with t0, t1, action (one of reach, grasp, lift, transit, place,
   release, retract, push, idle), arm ("arm" for single-arm robots, "left"/"right" for dual-arm), object, target.
 - keyframes: exactly one entry per attached keyframe, using its exact t: robot_box, object_boxes for every visible
@@ -109,8 +117,15 @@ Produce:
 - rest_frame_t: one of the keyframe times where the robot is at a rest/home pose and fully visible.
 - success_intent: one sentence of what success means for this task.
 - camera_guess."""
-    vu, resp = argon.ask_json("video_architect", SYSTEM, text, VideoUnderstanding, [small, *frames], model=ARGON,
-                              thinking="high")
+    try:   # the architect picks SimReady assets itself while it watches the clip
+        from core.argon import ask_with_tools
+        from core.assets import TOOL, run_tool
+
+        vu, resp = ask_with_tools(argon, "video_architect", SYSTEM, text, VideoUnderstanding,
+                                  {TOOL["name"]: (TOOL, run_tool)}, [small, *frames], max_rounds=4)
+    except Exception:  # noqa: BLE001 - the twin needs the understanding more than the asset choice
+        vu, resp = argon.ask_json("video_architect", SYSTEM, text, VideoUnderstanding, [small, *frames],
+                                  model=ARGON, thinking="high")
     snap = {round(t, 2) for t in times}
     for kf in vu.keyframes:
         kf.t = min(snap, key=lambda s: abs(s - kf.t))

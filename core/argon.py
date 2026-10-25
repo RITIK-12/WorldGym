@@ -483,4 +483,5 @@ def ask_with_tools(argon: Argon, name: str, system: str, prompt: str, schema: ty
     except (ValidationError, json.JSONDecodeError, ValueError) as e:
         fix = f"Your answer failed validation:\n{str(e)[:3000]}\n\nReturn the corrected single JSON object only."
         return argon.ask_json(f"{name}__fix", system, fix, schema, (), model, thinking, max_output_tokens,
+                              background=False if attachments else None,   # the chain still holds the media
                               previous_id=resp.get("interaction_id"))

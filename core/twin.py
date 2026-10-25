@@ -24,14 +24,15 @@ from pydantic import BaseModel
 from core.argon import ROBOTICS_ER, Argon
 from core.camera_solve import add_video_camera, apply_solution, render_body_mask, set_camera, solve_camera
 from core.camera_track import camera_at, track_camera, track_overlay
-from core.fidelity import measure_footprint, run_loop1
+from core.fidelity import measure_footprint
 from core.mjcf_compiler import ROBOTS, scene_table
 from core.motion_extract import extract, extract_multi
-from core.replay_critic import run_replay_critic
+from core.first_world import arm_bases, policy_from_phases, refine_positions, robot_frame, scene_from_vu
+from core.replay_critic import run_final_critic
 from core.robot_onboard import onboard, self_test, verify_robot
 from core.rollout import build_sim, run_episode
 from core.runs import Refused, Run
-from core.scene_build import author_scene, fallback_scene, make_task, mask_overlay, measure_objects
+from core.scene_build import make_task, mask_overlay, measure_objects
 from core.schemas import RobotAdapter, TaskSpec, VideoUnderstanding
 from core.segment import grabcut_mask, masks_from_boxes, norm_box_to_px
 from core.video_architect import dense_labels, understand
@@ -172,6 +173,18 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
         if not st["ok"]:
             raise RuntimeError(f"robot self-test failed: { {k: v['ok'] for k, v in st['checks'].items()} }")
 
+    with run.stage("first_world") as s:   # Gen 1: the architect's world and phases, no measurement yet
+        draft0 = scene_from_vu(vu, adapter)
+        task1 = make_task(run.run_id.split("_", 1)[-1] or "twin", adapter.robot_id, draft0,
+                          TaskSpec(name="cam", robot=adapter.robot_id, objects=[]), vu)
+        pol1 = policy_from_phases(task1, vu, adapter)
+        meshes = [o.asset.name for o in task1.objects if o.asset]
+        s.headline = (f"{len(task1.objects)} objects from the Video Architect"
+                      + (f" · SimReady: {', '.join(meshes)}" if meshes else "")
+                      + f" · {len(pol1.primitives)} primitives from its phases")
+        s.data = {"objects": [o.model_dump() for o in task1.objects], "policy": pol1.model_dump()}
+        publish_gen(run, 1, "First world", s.headline, task1, adapter, pol1 if pol1.primitives else None)
+
     with run.stage("camera_solve") as s:
         cands = sorted({round(min((k.t for k in vu.keyframes), default=0.0), 2), round(vu.rest_frame_t, 2)})
         best = None
@@ -235,50 +248,24 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
     cam_at = (lambda t: camera_at(track, t)) if track else None
     pose = best["pose"]
 
-    with run.stage("loop1_static") as s:
+    with run.stage("motion_extract") as s:   # Gen 2: measured positions + the labelling swarm's motion
         masks = masks_from_boxes(frame, best["obj_boxes"])
-        sim = posed_sim(cam_task, adapter, pose)
-        measured = measure_objects(sim.ix, sim.d, vu, masks)
-        overlay = mask_overlay(frame, masks, run.path("loop1/masks.jpg"))
-        try:
-            draft = author_scene(argon, vu, measured, run.path("camera/rest_frame.jpg"), overlay, prompt)
-        except Exception as e:  # noqa: BLE001 - the twin must still be built from the measurements
-            draft = fallback_scene(vu, measured)
-            s.data["author_error"] = str(e)[:300]
-        task = make_task(run.run_id.split("_", 1)[-1] or "twin", adapter.robot_id, draft, cam_task, vu)
-        try:   # Gen 1 already replays the demonstration: the labelling swarm ran alongside the stages above
-            sim1 = build_sim(task, adapter)
-            pol1 = (extract_multi(task, labels_job.result(), sim1, w, h, cam_at) if n_arms > 1 or moving
-                    else extract(task, labels_job.result(), sim1, w, h))[0]
-        except Exception as e:  # noqa: BLE001 - show the static world rather than nothing
-            pol1 = None
-            s.data["gen1_motion_error"] = str(e)[:300]
-        publish_gen(run, 1, "First world", f"{len(task.objects)} objects placed by the Scene Author", task, adapter,
-                    pol1 if pol1 is not None and pol1.primitives else None)
-        context = f"Task: {vu.success_intent}. Robot: {adapter.robot_id} ({n_arms} arm(s))."
-        res = run_loop1(task, frame, masks, run.path("loop1"), argon=argon, context=context,
-                        robot_mask=best["mask"], build=lambda t: posed_sim(t, adapter, pose))
-        task = res["task"]
-        run.write_json("loop1/task.json", task.model_dump())
-        start = res["history"][0]["alignment"]
-        s.headline = f"alignment {start * 100:.0f} % → {res['alignment'] * 100:.0f} % in {len(res['history']) - 1} iteration(s)"
-        s.data = {"alignment": res["alignment"], "objects": res["objects"], "measured": measured,
-                  "history": [{k: v for k, v in r.items() if k != "task"} for r in res["history"]],
-                  "author_notes": draft.notes}
-        s.artifacts += ["loop1/masks.jpg", "loop1/task.json", "loop1/history.json",
-                        run.rel(res["final_views"]["matrix"])]
-
-    with run.stage("motion_extract") as s:
+        msim = posed_sim(cam_task, adapter, pose)
+        measured = measure_objects(msim.ix, msim.d, vu, masks)
+        mask_overlay(frame, masks, run.path("motion/masks.jpg"))
+        task, moved = refine_positions(task1.model_copy(update={"cameras": cam_task.cameras}), measured)
+        run.write_json("motion/task.json", task.model_dump())
         labels = labels_job.result()
         pool.shutdown()
         run.write_json("motion/labels.json", [k.model_dump() for k in labels])
         sim = build_sim(task, adapter)
-        if n_arms > 1 or moving:
-            draft1, log = extract_multi(task, labels, sim, w, h, cam_at)
-        else:
-            draft1, log = extract(task, labels, sim, w, h)
+        try:
+            draft1, log = (extract_multi(task, labels, sim, w, h, cam_at) if n_arms > 1 or moving
+                           else extract(task, labels, sim, w, h))
+        except Exception as e:  # noqa: BLE001 - keep the architect's motion
+            draft1, log = pol1, {"segments": [], "error": str(e)[:300]}
         if not draft1.primitives:
-            raise RuntimeError("no grasp -> release segment found in the labels")
+            draft1 = pol1
         run.write_json("motion/motion_extract.json", log)
         run.write_json("motion/draft1.json", draft1.model_dump())
         ep = run_episode(task, draft1, adapter)
@@ -286,32 +273,37 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
         err, per = end_pose_error(task, ep, real_end)
         dyn = {"replay_success": ep.success, "end_pose_err_mm": err, "per_object_mm": per, "real_end_xy": real_end}
         kinds = ", ".join(f"{p.arm}:{p.kind}" for p in draft1.primitives)
-        s.headline = (f"Draft 1 [{kinds}] from {len(labels)} labelled frames · replay "
-                      f"{'succeeds' if ep.success else 'fails'}"
-                      + (f" · end error {err:.0f} mm" if err is not None else ""))
-        s.data = {"segments": log["segments"], "dynamic": dyn, "n_labels": len(labels)}
+        s.headline = (f"positions measured for {len(moved)}/{len(task.objects)} objects · motion [{kinds}] from "
+                      f"{len(labels)} labelled frames" + (f" · end error {err:.0f} mm" if err is not None else ""))
+        s.data = {"segments": log.get("segments", []), "moved_mm": moved, "measured": measured, "dynamic": dyn,
+                  "n_labels": len(labels)}
         s.artifacts += ["motion/labels.json", "motion/motion_extract.json", "motion/draft1.json"]
-        publish_gen(run, 2, "Twin + demonstrated motion",
-                    f"Twin Critic alignment {res['alignment'] * 100:.0f} % · motion from {len(labels)} labelled frames",
-                    task, adapter, draft1)
+        publish_gen(run, 2, "Measured world + swarm motion", s.headline, task, adapter, draft1)
 
-    with run.stage("replay_critic") as s:
-        grasp_t = log["segments"][0]["grasp_t"]
-        rc = run_replay_critic(video, task, draft1, adapter, argon, grasp_t, log,
-                               lambda e: end_pose_error(task, e, real_end)[0], run.path("replay_critic"),
-                               cam_at=cam_at)
-        draft1 = rc["draft"].model_copy(update={"name": "draft1"})
+    with run.stage("final_critic") as s:   # Gen 3: Argon watches the original + four views of the Gen 2 run
+        segs = log.get("segments") or []
+        grasp_t = segs[0]["grasp_t"] if segs else (min((p.t0 for p in vu.phases if p.action == "grasp"),
+                                                       default=t_act0))
+        origin, fwd, left = robot_frame(adapter)
+        frame_txt = (f"World frame: the robot's forward is world {fwd.round(3).tolist()}, its left is world "
+                     f"{left.round(3).tolist()}, origin {origin.round(3).tolist()}; arm bases "
+                     f"{ {k: v.round(3).tolist() for k, v in arm_bases(adapter).items()} }.")
+        rc = run_final_critic(video, run.path("architect/clip_small.mp4"), task, draft1, adapter, argon, grasp_t,
+                              lambda t, e: end_pose_error(t, e, real_end)[0], run.path("final_critic"),
+                              cam_at=cam_at, robot_frame=frame_txt)
+        task, draft1 = rc["task"], rc["draft"].model_copy(update={"name": "draft1"})
         run.write_json("motion/draft1.json", draft1.model_dump())
+        run.write_json("final_critic/task.json", task.model_dump())
         dyn = {**dyn, "replay_success": rc["episode"].success, "end_pose_err_mm": rc["end_pose_err_mm"],
                "before_critic": rc["start"]}
         e0, e1 = rc["start"]["end_pose_err_mm"], rc["end_pose_err_mm"]
-        s.headline = ("replay " + ("succeeds" if rc["episode"].success else "fails")
+        kept = any(h.get("kept") for h in rc["history"])
+        s.headline = ("four-view critique " + ("applied" if kept else "proposed, not better: Gen 2 kept")
                       + (f" · end error {e0:.0f} → {e1:.0f} mm" if e0 is not None and e1 is not None else ""))
         s.data = {"history": rc["history"], "dynamic": dyn}
-        publish_gen(run, 3, "Motion refined by the Replay Critic",
-                    f"end-pose error {e0:.0f} → {e1:.0f} mm" if e0 is not None and e1 is not None else s.headline,
-                    task, adapter, draft1)
-        s.artifacts += [run.rel(rc["video"])] + [run.rel(h["video"]) for h in rc["history"] if h.get("video")]
+        s.artifacts += [run.rel(Path(h["video"])) for h in rc["history"] if h.get("video")]
+        publish_gen(run, 3, "Refined by the four-view critic", s.headline, task, adapter, draft1)
+
     return {"task": task, "draft1": draft1, "adapter": adapter, "dynamic_ref": dyn, "vu": vu}
 
 

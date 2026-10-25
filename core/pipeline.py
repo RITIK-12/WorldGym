@@ -26,8 +26,8 @@ from core.runs import Refused, Run, new_run
 from core.schemas import PolicyConfig, RobotAdapter, TaskSpec
 from core.swarm import adversarial_suite, harden, hypotheses_from_clusters, launch_agents, local_search, poll_agents
 
-TWIN_STAGES = ["qa", "video_architect", "robot_onboard", "camera_solve", "loop1_static", "motion_extract",
-               "replay_critic"]
+TWIN_STAGES = ["qa", "video_architect", "robot_onboard", "first_world", "camera_solve", "motion_extract",
+               "final_critic"]
 POLICY_STAGES = ["replay", "benchmark", "loop2_critic", "loop3_swarm", "report"]
 
 
