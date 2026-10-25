@@ -99,7 +99,9 @@ def side_by_side(video: str, task: TaskSpec, ep: Episode, video_grasp_t: float, 
 
 
 def _score(ep: Episode, end_err: float | None) -> tuple:
-    return (ep.success, -(end_err if end_err is not None else 1e3))
+    """Success first, then fewer unwanted collisions (arm-arm, robot-table, ...), then a smaller end-pose error."""
+    hits = ep.summary()["trace"]["metrics"].get("unwanted_collision_count", 0)
+    return (ep.success, -hits, -(end_err if end_err is not None else 1e3))
 
 
 def run_replay_critic(video: str, task: TaskSpec, draft: PolicyConfig, adapter: RobotAdapter, argon: Argon,
@@ -222,7 +224,7 @@ def apply_scene(task: TaskSpec, edits: list[ObjectEdit]) -> TaskSpec:
 
 def run_final_critic(video: str, ref_clip: Path, task: TaskSpec, draft: PolicyConfig, adapter: RobotAdapter,
                      argon: Argon, video_grasp_t: float, end_error, out_dir: Path, cam_at=None,
-                     max_iters: int = 1, robot_frame: str = "") -> dict:
+                     max_iters: int = 2, robot_frame: str = "") -> dict:
     """Original clip + the four-view video of the current run -> scene edits + DSL patch, kept only when the
     replay improves (success first, then end-pose error)."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -247,6 +249,8 @@ Current policy ({best[1].name}):
 {best[1].model_dump_json(indent=1)}
 
 Resolved values in the run: {json.dumps(s['resolved'])}
+Your earlier rounds (root causes, outcome, kept): {json.dumps([{k: h.get(k) for k in ('iteration', 'root_causes',
+    'success', 'end_pose_err_mm', 'collisions', 'kept')} for h in history], default=str)[:3000] or "none"}
 Run outcome: success={s['success']}, end-pose error vs the last video frame = {best[3]} mm,
 predicates={json.dumps([(p['kind'], p.get('object_id'), p['ok']) for p in s['evaluation']['predicates']])},
 events={json.dumps([(e['type'], e['t'], e.get('arm'), e.get('object')) for e in s['trace']['events']][:25])}
@@ -265,8 +269,12 @@ Attachments: the original demonstration, then the four-view video of this run (i
         kept = _score(ep2, err2) > _score(best[2], best[3])
         history.append({"iteration": it, "critique": patch.critique, "root_causes": patch.root_causes,
                         "scene": [e.model_dump() for e in patch.scene], "diff": param_diff(best[1], cand),
-                        "success": ep2.success, "end_pose_err_mm": err2, "kept": kept, "video": str(clip)})
+                        "success": ep2.success, "end_pose_err_mm": err2, "kept": kept, "video": str(clip),
+                        "collisions": ep2.summary()["trace"]["metrics"].get("unwanted_collision_count", 0)})
         if kept:
             best = (ctask, cand, ep2, err2)
+        hits = best[2].summary()["trace"]["metrics"].get("unwanted_collision_count", 0)
+        if best[2].success and hits == 0 and best[3] is not None and best[3] <= 60.0:
+            break
     return {"task": best[0], "draft": best[1], "episode": best[2], "end_pose_err_mm": best[3], "history": history,
             "start": {"success": ep.success, "end_pose_err_mm": err}}

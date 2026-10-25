@@ -199,6 +199,17 @@ uv run pytest -q
   geometry, convex collision meshes, authored mass, grasp points); the Scene Author can call it as a function tool
   (Interactions `requires_action` → `function_result` loop) and sees thumbnails. A SimReady sponge in the bimanual
   wipe: 100 % coverage, 0 unwanted contacts. Incomplete interactions (output budget) now retry with a doubled budget.
+- **16:09** Final live run on the user's handheld bimanual clip through the one UI (cache off, started 15:56).
+  One Argon call (plus SimReady tool turns) returned the robot, picked against a sheet of rendered Menagerie
+  candidates (i2rt YAM, correct), both objects with robot-frame layout (bar fixed, long side left-right, 0.30 m in
+  front of the arm bases; sponge to its right) and the SimReady sponge `cleaning_sponge_g01`, plus 11 phases.
+  Gen 1 at 5 min 20 s (architect only): wiped coverage 43 %, 3 unwanted contacts. Camera: silhouette IoU 0.78,
+  105/133 frames tracked. Gen 2 at 6 min 45 s (measured positions for 2/2 objects, motion from 121 swarm-labelled
+  frames): coverage 70 %, task check passes, 1 contact. Gen 3 at 11 min 20 s: Argon's four-view critique (grasp too
+  deep at 7.8 s, lift 5-6 cm too high, wipe should end at the bar's left end, sponge goes back) cut the end-pose
+  error 339 → 165 mm and raised coverage to 84 %, but the left-end wipe made the arms touch (12 arm-arm contacts),
+  which the improvement gate did not count. The gate now ranks success, then unwanted contacts, then end-pose
+  error, and the critic gets a second round that sees its first round's outcome.
 
 ## Lessons (API quirks found today)
 
@@ -222,3 +233,7 @@ uv run pytest -q
   `function_result` steps and `previous_interaction_id` continues the same chain. Results may include images.
 - A text-only follow-up chained onto an image call (`previous_interaction_id`) inherits the images, so it must also
   run synchronously; in background mode the server routes it to the `-agent` variant and rejects image input.
+- Latency is set by output tokens at `thinking_level="high"`: the single Video Architect call spent 82 s on its
+  first turn (watching the clip, calling the SimReady search) and 3 min 49 s writing 11k tokens of answer.
+  `medium` thinking is the remaining lever; folding the label review and the robot check into the same call
+  removed two sequential calls (about 2.5 min).
