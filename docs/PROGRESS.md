@@ -68,6 +68,27 @@ a numeric verification signal it is judged by (never another model's opinion).
 The Twin Critic keeps server-side state across iterations (`previous_interaction_id`), so each critique sees what it
 already tried; independent critiques (per object / per view / per hypothesis) run in parallel.
 
+## Demo runbook (3 minutes)
+
+```bash
+uv run python -m app.studio --port 8080                                 # open http://localhost:8080
+uv run python -m core.pipeline --video demo/synthetic_panda_sort.mp4 \
+    --prompt "Put the red cube and the blue cylinder into the grey bin without knocking over the yellow barrier."
+uv run python -m core.pipeline --video <handheld clip> --prompt "Wipe the steel bar with the sponge." --swarm antigravity
+WORLDGYM_LLM=replay uv run python -m core.pipeline ...                  # offline fallback from cached responses
+```
+
+Story mode (one picture, one sentence, one number per step):
+1. **Input**: the clip + prompt; QA verdict (handheld clips enter moving-camera mode).
+2. **Argon builds the twin**: Video Architect → label review → robot identity by rendered candidates → self-test.
+3. **Real ↔ Sim**: robot-silhouette camera solve, tracked metric grid, 4-view matrix per Twin Critic iteration,
+   alignment %.
+4. **Replay reproduces the video**: Draft 1 extracted from the labels, real | sim side by side, end-pose error.
+5. **The benchmark breaks it**: dev + locked held-out (sha256) success.
+6. **Critique and repair**: Argon's timestamped critique and the parameter diff.
+7. **Held-out ratchet**: Draft 1 → 2 → 3, with the Antigravity swarm's adversarial scenarios.
+8. **Your turn**: move objects / raise obstacles and run the policy live.
+
 ## Runaway-loop guard (not a spend limit)
 
 Argon runs at `thinking_level="high"` with the full 65,536-token output window. Live calls go through
