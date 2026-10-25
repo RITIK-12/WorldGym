@@ -83,6 +83,45 @@ def _empty_task(adapter: RobotAdapter, objects=(), preds=()) -> TaskSpec:
                     immutable_success_predicates=list(preds))
 
 
+def reach_workspace(m: mujoco.MjModel, ctrl: ArmController, n: int = 6000, seed: int = 0) -> dict:
+    """Workspace grid scaled to the arm: sample joint configurations, keep those with the TCP pointing down at a
+    table-top height, and use the 90th percentile of their horizontal reach (a Panda gives roughly x 0.3-0.6 m)."""
+    rng = np.random.default_rng(seed)
+    base = ctrl.scratch.xpos[m.body_rootid[m.site_bodyid[ctrl.site]]].copy()
+    reach = []
+    saved = ctrl.q_cmd.copy()
+    for _ in range(n):
+        ctrl.q_cmd = rng.uniform(ctrl.lo, ctrl.hi)
+        p, R = ctrl.cmd_pose()
+        if R[2, 2] < -0.9 and 0.02 <= p[2] <= 0.30:
+            reach.append(float(np.linalg.norm(p[:2] - base[:2])))
+    ctrl.q_cmd = saved
+    r = float(np.percentile(reach, 90)) if len(reach) >= 20 else 0.6
+    return {"x": [round(max(0.15, 0.4 * r), 3), round(0.75 * r, 3)], "y": round(0.3 * r, 3), "z": [0.02, 0.15, 0.30],
+            "reach_m": round(r, 3), "n_downward_samples": len(reach)}
+
+
+def frame_diagnostics(m: mujoco.MjModel, d: mujoco.MjData, ctrl: ArmController, arm) -> dict:
+    """Where the TCP frame points and where the fingers are, at the home pose (feedback for fixing an adapter)."""
+    saved = d.qpos.copy()
+    d.qpos[ctrl.g_qadr] = arm.gripper.max_width_m / 2   # fingers open so their separation shows the closing axis
+    mujoco.mj_forward(m, d)
+    p, R = ctrl.tcp_pose()
+    fingers = [d.xpos[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, b)].copy() for b in arm.finger_bodies]
+    width = ctrl.gripper_width()
+    d.qpos[:] = saved
+    mujoco.mj_forward(m, d)
+    out = {"tcp_world": np.round(p, 4).tolist(),
+           "tcp_axes_world": {k: np.round(R[:, i], 3).tolist() for i, k in enumerate("xyz")},
+           "gripper_width_open": round(width, 4)}
+    if len(fingers) >= 2:
+        mid = np.mean(fingers, 0)
+        sep = fingers[0] - fingers[1]
+        out["finger_bodies_mid_in_tcp_frame"] = np.round(R.T @ (mid - p), 4).tolist()
+        out["finger_separation_dir_in_tcp_frame"] = np.round(R.T @ sep / (np.linalg.norm(sep) + 1e-9), 3).tolist()
+    return out
+
+
 def self_test(adapter: RobotAdapter) -> dict:
     checks: dict[str, dict] = {}
     try:
@@ -108,23 +147,29 @@ def self_test(adapter: RobotAdapter) -> dict:
            and (m.geom_bodyid[d.contact[i].geom1] in robot_b or m.geom_bodyid[d.contact[i].geom2] in robot_b)]
     checks["home_collision_free"] = {"ok": not pen, "penetrations": pen[:6]}
 
-    errs = []
-    for z in (0.02, 0.15, 0.30):
-        for x in np.linspace(0.3, 0.6, 5):
-            for y in np.linspace(-0.25, 0.25, 5):
+    checks["frames"] = {"ok": True, **frame_diagnostics(m, d, ctrl, arm)}
+    ws = reach_workspace(m, ctrl)
+    errs, fails = [], []
+    for z in ws["z"]:
+        for x in np.linspace(*ws["x"], 5):
+            for y in np.linspace(-ws["y"], ws["y"], 5):
                 ctrl.q_cmd = np.array(arm.home_qpos, float)
                 _, e = ctrl.solve_ik(np.array([x, y, z]), top_down_R(0.0, arm.closing_axis))
                 errs.append(e)
+                if e >= IK_TOL_M:
+                    fails.append([round(float(x), 3), round(float(y), 3), z, round(e * 1000, 1)])
     errs = np.array(errs)
     checks["ik_grid"] = {"ok": bool(errs.max() < IK_TOL_M), "max_err_mm": round(float(errs.max()) * 1000, 2),
-                         "n_fail": int((errs >= IK_TOL_M).sum()), "n": len(errs)}
+                         "n_fail": int((errs >= IK_TOL_M).sum()), "n": len(errs), "workspace": ws,
+                         "worst": sorted(fails, key=lambda f: -f[3])[:5]}
 
     from core.rollout import run_episode  # local import: rollout imports this module's neighbours
 
-    box = ObjectSpec(id="probe_box", shape="box", dims_m=[0.04, 0.04, 0.04], xy=[0.45, 0.0], mass=0.1, friction=0.9)
+    bx = round(float(np.mean(ws["x"])), 3)
+    box = ObjectSpec(id="probe_box", shape="box", dims_m=[0.04, 0.04, 0.04], xy=[bx, 0.0], mass=0.1, friction=0.9)
     pol = PolicyConfig(name="selftest", primitives=[Primitive(arm=arm.name, object_id="probe_box", target_id=None,
                                                               post_grasp_lift_z_m=0.24, transit_apex_z_m=0.24,
-                                                              pre_place_hover_z_m=0.24, place_xy_offset_m=[0.45, 0.0],
+                                                              pre_place_hover_z_m=0.24, place_xy_offset_m=[bx, 0.0],
                                                               release_drop_height_m=0.2)])
     try:
         box_task = _empty_task(adapter, [box])
@@ -149,12 +194,17 @@ def self_test(adapter: RobotAdapter) -> dict:
 # ----------------------------------------------------------------------------------------------------------------------
 
 ONBOARD_SYSTEM = """You onboard robot arms into WorldGym, a MuJoCo pipeline. Given a structural summary of a MuJoCo
-Menagerie robot, write a RobotAdapter JSON. Rules: `tcp` is the point midway between the fingertip pads (add an
-offset on the last hand body if no such site exists); `closing_axis` is the TCP-frame axis along which the fingers
-close ("x" or "y") with the TCP z axis pointing out of the fingers; gripper.kind is "tendon_force" when the gripper
-actuator drives a tendon, else "joint_force"; home_qpos is a natural ready pose with the hand ~0.4 m above the
-table pointing down; vel_limits are datasheet joint speed limits in rad/s; robot_bodies lists every body of the arm
-and hand; finger_bodies lists the bodies that touch the object."""
+Menagerie robot, write a RobotAdapter JSON. Rules:
+- `tcp` is the point midway between the fingertip pads, on the last hand body, with its quat chosen so the TCP z axis
+  points OUT of the fingers (from the wrist toward the object) and the fingers close along TCP `closing_axis`.
+- gripper.kind is "tendon_force" when the gripper actuator drives a tendon, else "joint_force"; `joints` are the finger
+  joints whose positions sum to the opening width; max_width_m is the full opening.
+- home_qpos is a ready pose with the gripper pointing straight DOWN (TCP z axis ~ [0, 0, -1] in the world), the TCP
+  0.2-0.4 m above the table and in front of the base, all joints inside their ranges, away from singularities.
+- vel_limits are datasheet joint speed limits in rad/s; robot_bodies lists every arm and hand body; finger_bodies
+  lists the bodies that touch the object.
+The self-test reports `frames` (TCP position and axes in the world at home, finger midpoint and separation direction
+in the TCP frame): use it to check the TCP orientation and the home pose."""
 
 
 def onboard(menagerie_dir: str, argon: Argon | None = None, max_iters: int = 3, log_dir: Path | None = None) -> dict:
@@ -187,3 +237,56 @@ if __name__ == "__main__":
     import sys
 
     print(json.dumps(self_test(RobotAdapter.model_validate_json(Path(sys.argv[1]).read_text())), indent=1))
+
+
+AGENT_ONBOARD_PROMPT = """You are onboarding the robot `{menagerie_dir}` into WorldGym (a MuJoCo pipeline mounted at ./worldgym).
+Setup: cd worldgym && pip install uv && uv sync && scripts/setup_assets.sh {menagerie_dir}
+Goal: write robots/{robot_id}.json (a RobotAdapter, see core/schemas.py and the example robots/franka_panda.json) so
+that `uv run python -m core.robot_onboard robots/{robot_id}.json` reports "ok": true for every check (compiles,
+home_collision_free, ik_grid, gripper_hold_lift, velocity_limits). Read the Menagerie MJCF under
+assets/menagerie/{menagerie_dir}/ and core/robot_onboard.py, core/controller.py, core/mjcf_compiler.py to see how the
+adapter is used. Write small scripts to inspect the model (body frames, joint ranges, finger axes) and to search for a
+home pose with the gripper pointing down. Iterate until the self-test passes or you run out of ideas.
+Do NOT modify anything under core/ or tests/: only robots/{robot_id}.json and your own scratch scripts.
+Finish with ONE JSON object as your final answer: {{"adapter": <the RobotAdapter JSON>, "self_test": <the final
+self-test JSON>, "notes": "what you found about this robot"}}."""
+
+
+def onboard_with_agent(menagerie_dir: str, robot_id: str, argon: Argon, log_dir: Path,
+                       timeout_s: float = 2400) -> dict:
+    """Antigravity Managed Agent writes the adapter in a sandbox with the self-test as its verification loop; the
+    returned adapter is re-verified locally before it is stored."""
+    import time
+
+    from core.argon import check_budget, parse_json, record_spend
+    from core.swarm import AGENT, AGENT_MAX_TOKENS, ALLOWLIST, _inline_sources
+
+    client = argon.client
+    env = {"type": "remote", "sources": _inline_sources({}),
+           "network": {"allowlist": [{"domain": d} for d in ALLOWLIST]}}
+    prompt = AGENT_ONBOARD_PROMPT.format(menagerie_dir=menagerie_dir, robot_id=robot_id)
+    (log_dir / "agent_prompt.md").write_text(prompt)
+    check_budget("agent", f"onboard_{robot_id}")
+    it = client.interactions.create(agent=AGENT, agent_config={"type": "antigravity", "model": ARGON,
+                                                               "max_total_tokens": AGENT_MAX_TOKENS},
+                                    input=prompt, environment=env, background=True)
+    record_spend("agent", f"onboard_{robot_id}", AGENT, None, True, it.id)
+    t0 = time.time()
+    while it.status in ("in_progress", "queued") and time.time() - t0 < timeout_s:
+        time.sleep(15)
+        it = client.interactions.get(it.id)
+    u = it.usage.model_dump() if getattr(it, "usage", None) is not None else {}
+    record_spend("agent_usage", f"onboard_{robot_id}", AGENT, u, it.status == "completed", it.id)
+    text = it.output_text or ""
+    (log_dir / "agent_output.md").write_text(text)
+    try:
+        out = parse_json(text)
+        adapter = RobotAdapter.model_validate(out["adapter"])
+    except Exception as e:  # noqa: BLE001
+        return {"adapter": None, "self_test": {"ok": False}, "source": f"agent ({it.status}): {e}"[:300],
+                "seconds": round(time.time() - t0)}
+    local = self_test(adapter)   # trust, but verify on our machine
+    if local["ok"]:
+        (ROBOTS / f"{adapter.robot_id}.json").write_text(adapter.model_dump_json(indent=1))
+    return {"adapter": adapter, "self_test": local, "agent_self_test": out.get("self_test"),
+            "notes": out.get("notes", ""), "source": "antigravity agent", "seconds": round(time.time() - t0)}
