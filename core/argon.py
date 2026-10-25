@@ -395,8 +395,10 @@ class Argon:
             err = str(e)[:4000]
         fix = f"Your previous answer failed validation:\n{err}\n\nReturn the corrected single JSON object only."
         if resp.get("interaction_id") and self.backend == "gemini":  # multi-turn: no need to resend attachments
+            # the chained turn still carries the images, so it must stay synchronous like the original call
             text2, resp2 = self.ask_text(f"{name}__fix", system, fix, (), model, thinking, json_mode=True,
-                                         previous_id=resp["interaction_id"], max_output_tokens=max_output_tokens)
+                                         previous_id=resp["interaction_id"], max_output_tokens=max_output_tokens,
+                                         background=False if attachments else background)
         else:
             text2, resp2 = self.ask_text(f"{name}__fix", system, f"{prompt}{rule}\n\nPrevious answer:\n{text[:20000]}"
                                          f"\n\n{fix}", attachments, model, thinking, json_mode=True,
