@@ -31,6 +31,7 @@ WINDOW_PX = 45
 OFFSET_SCALE_PX = 15.0
 TARGET = 0.90
 MAX_ITERS = 3
+MIN_SOLIDITY = 0.85   # ragged real footprints (e.g. GrabCut on thin objects) only move the object, never resize it
 EDITABLE = {"xy", "yaw", "dims_m", "shape", "colour", "on_top_of", "z", "is_obstacle", "is_fixed", "parts", "wall_m",
             "mass", "friction", "stem_w_m", "flange_d_m"}
 
@@ -122,13 +123,16 @@ def measure_footprint(ix: SceneIndex, d: mujoco.MjData, cam: str, mask: np.ndarr
         return None
     cs, _ = cv2.findContours(fp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     c = max(cs, key=cv2.contourArea)
+    hull = cv2.contourArea(cv2.convexHull(c))
+    solidity = float(cv2.contourArea(c) / hull) if hull > 0 else 0.0
     (cx, cy), (w, h), ang = cv2.minAreaRect(c)
     ys, xs = np.nonzero(fp)
     centre = lo + (np.array([xs.mean(), ys.mean()]) + 0.5) * res_m
     yaw = math.radians(ang)
     ext = [w * res_m, h * res_m]
     return {"xy": [round(float(centre[0]), 4), round(float(centre[1]), 4)], "rect_yaw": round(yaw, 4),
-            "rect_extents_m": [round(e, 4) for e in ext], "area_m2": round(float(fp.sum()) * res_m ** 2, 6)}
+            "rect_extents_m": [round(e, 4) for e in ext], "area_m2": round(float(fp.sum()) * res_m ** 2, 6),
+            "solidity": round(solidity, 3)}
 
 
 def _box_yaw_dims(o: ObjectSpec, fp: dict) -> tuple[float, list[float]]:
@@ -159,7 +163,7 @@ def analytic_patch(task: TaskSpec, ix: SceneIndex, d: mujoco.MjData, real_masks:
             continue
         measured[o.id] = fp
         by_id[o.id]["xy"] = fp["xy"]
-        if shape_from_footprint and o.shape in ("box", "container"):
+        if shape_from_footprint and o.shape in ("box", "container") and fp["solidity"] >= MIN_SOLIDITY:
             yaw, ext = _box_yaw_dims(o, fp)
             by_id[o.id]["yaw"] = round(float(yaw), 4)
             if all(0.3 < e / max(g, 1e-6) < 3.0 for e, g in zip(ext, o.dims_m[:2])):
