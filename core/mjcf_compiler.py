@@ -191,8 +191,31 @@ def _find_body(root: ET.Element, name: str) -> ET.Element:
     raise KeyError(f"body {name!r} not in robot XML")
 
 
+def build_multi_arm_xml(adapter: RobotAdapter) -> Path:
+    """Several prefixed copies of a single-arm Menagerie model (MjSpec.attach), written next to it."""
+    import warnings
+
+    d = MENAGERIE / adapter.menagerie_dir
+    out = d / adapter.mjcf
+    b = adapter.build
+    spec = mujoco.MjSpec()
+    spec.compiler.degree = False
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for name, (x, y, yaw) in b["arms"].items():
+            child = mujoco.MjSpec.from_file(str(d / b["from"]))
+            spec.meshdir, spec.texturedir = child.meshdir, child.texturedir
+            frame = spec.worldbody.add_frame(pos=[x, y, 0.0], quat=[math.cos(yaw / 2), 0, 0, math.sin(yaw / 2)])
+            frame.attach_body(child.body(b["root"]), f"{name}/", "")
+        spec.compile()
+    out.write_text(spec.to_xml())
+    return out
+
+
 def _patch_robot(adapter: RobotAdapter, base_pose: list[float]) -> ET.Element:
     src = MENAGERIE / adapter.menagerie_dir / adapter.mjcf
+    if adapter.build and not src.exists():
+        build_multi_arm_xml(adapter)
     root = ET.parse(src).getroot()
 
     comp = root.find("compiler")

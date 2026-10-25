@@ -1,0 +1,109 @@
+{
+ "robot_id": "i2rt_yam",
+ "menagerie_dir": "i2rt_yam",
+ "mjcf": "yam.xml",
+ "arms": [
+  {
+   "name": "arm",
+   "joints": [
+    "joint1",
+    "joint2",
+    "joint3",
+    "joint4",
+    "joint5",
+    "joint6"
+   ],
+   "actuators": [
+    "joint1",
+    "joint2",
+    "joint3",
+    "joint4",
+    "joint5",
+    "joint6"
+   ],
+   "tcp": {
+    "body": "link_6",
+    "pos": [
+     0.0,
+     0.0,
+     0.1347
+    ],
+    "quat": [
+     1.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "closing_axis": "x",
+   "gripper": {
+    "kind": "joint_force",
+    "actuator": "gripper",
+    "joints": [
+     "left_finger"
+    ],
+    "max_width_m": 0.0375,
+    "force_range": 40.0,
+    "finger_force_per_ctrl": 1.0
+   },
+   "home_qpos": [
+    0.0,
+    1.687,
+    1.5972,
+    -1.481,
+    0.0,
+    1.5708
+   ],
+   "rest_qpos": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "vel_limits": [
+    3.14,
+    3.14,
+    3.14,
+    3.14,
+    3.14,
+    3.14
+   ],
+   "servo_damping": null,
+   "cmd_speed_fraction": 0.7,
+   "robot_bodies": [
+    "arm",
+    "link_1",
+    "link_2",
+    "link_3",
+    "link_4",
+    "link_5",
+    "link_6",
+    "link_left_finger",
+    "lf_rot",
+    "lf_down",
+    "link_right_finger",
+    "rf_rot",
+    "rf_down"
+   ],
+   "finger_bodies": [
+    "link_left_finger",
+    "lf_rot",
+    "lf_down",
+    "link_right_finger",
+    "rf_rot",
+    "rf_down"
+   ]
+  }
+ ],
+ "base_poses": [
+  [
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ]
+ ],
+ "table": null
+}

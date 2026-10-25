@@ -44,6 +44,7 @@ class ArmSpec(Strict):
     rest_qpos: list[float] | None = None   # pose the robot sits in when idle (camera calibration); default home_qpos
     vel_limits: list[float]
     servo_damping: float | None = None     # kv = servo_damping * kp for undamped position servos (opt-in)
+    cmd_speed_fraction: float = 1.0        # commanded joint speed cap as a fraction of vel_limits (soft servos)
     robot_bodies: list[str]
     finger_bodies: list[str]
 
@@ -62,6 +63,7 @@ class RobotAdapter(Strict):
     arms: list[ArmSpec]
     base_poses: list[list[float]] = [[0.0, 0.0, 0.0, 0.0]]  # (x, y, z, yaw) per arm
     table: TableSpec | None = None         # default table for this robot's workspace
+    build: dict | None = None              # generate `mjcf` from a single-arm model: {"from", "root", "arms": {name: [x, y, yaw]}}
 
 
 # ----------------------------------------------------------------------------------------------------------------------

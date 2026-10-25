@@ -88,7 +88,7 @@ class ArmController:
         self.act = np.array([mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, a) for a in arm.actuators])
         self.tau = -m.actuator_biasprm[self.act, 2] / m.actuator_gainprm[self.act, 0]
         self.lo, self.hi = m.jnt_range[jid].T.copy()
-        self.vel = np.array(arm.vel_limits)
+        self.vel = np.array(arm.vel_limits) * arm.cmd_speed_fraction
         self.q_home = np.array(arm.home_qpos)
         self.site = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, f"tcp_{arm.name}")
         self.n = len(jid)

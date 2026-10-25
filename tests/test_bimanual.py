@@ -48,3 +48,12 @@ def test_biarm_hold_and_wipe_succeeds():
     t_hold = next(p["t0"] for p in tl["left"] if p["phase"] == "hold")
     t_reach = next(p["t0"] for p in tl["right"] if p["phase"] == "reach")
     assert t_reach >= t_hold   # sync_after: the right arm starts once the left arm holds
+
+
+def test_yam_biarm_generated_and_self_tested(tmp_path):
+    from core.robot_onboard import render_candidates
+
+    r = self_test(load_adapter("i2rt_yam_biarm"))
+    assert r["ok"], {k: v["ok"] for k, v in r["checks"].items()}
+    sheet = render_candidates(["i2rt_yam", "franka_emika_panda"], tmp_path / "c.jpg")
+    assert sheet.exists() and sheet.stat().st_size > 10_000
