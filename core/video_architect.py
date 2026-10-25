@@ -80,11 +80,11 @@ def understand(video: str | Path, probe: dict, prompt: str, argon: Argon, out_di
         times = sorted(set(times) | {round(dur * (k + 0.5) / n_extra, 2) for k in range(n_extra)})
     times = _dedupe(times, 0.4)[:16]
     frames = extract_frames(video, times, out_dir / "keyframes", prefix="kf")
-    small = downscale(video, out_dir / "clip_small.mp4", trim=probe.get("trim"))
+    small = downscale(video, out_dir / "clip_small.mp4", max_s=max(dur + 1.0, 30.0))  # same time base as keyframes
     models = menagerie_models()
     text = f"""TASK PROMPT FROM THE USER: "{prompt}"
 
-The video is attached (clip_small.mp4, {dur:.1f} s, original {probe.get('width')}x{probe.get('height')}).
+The video is attached (clip_small.mp4, {dur:.1f} s, original {probe.get('width')}x{probe.get('height')}).{_trim_note(probe)}
 Keyframes are attached as JPEGs with these timestamps:
 {_kf_list(frames, times)}
 
@@ -142,6 +142,11 @@ the fingers are open, and held is the id of the object currently held between th
             kf.t = min(snap, key=lambda s: abs(s - kf.t))
         labels += out.keyframes
     return sorted(labels, key=lambda k: k.t)
+
+
+def _trim_note(probe: dict) -> str:
+    t = probe.get("trim")
+    return f" Most of the task motion happens within [{t[0]:.1f}, {t[1]:.1f}] s." if t else ""
 
 
 def _dedupe(times: list[float], gap: float) -> list[float]:
