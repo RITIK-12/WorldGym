@@ -45,7 +45,9 @@ def main(run_dir: str) -> None:
                               robot_frame=frame_txt)
         e0, e1 = rc["start"]["end_pose_err_mm"], rc["end_pose_err_mm"]
         kept = any(h.get("kept") for h in rc["history"])
-        s.headline = ("four-view critique " + ("applied" if kept else "proposed, not better: Gen 2 kept")
+        errored = bool(rc["history"]) and all(h.get("error") for h in rc["history"])
+        s.headline = ("four-view critique " + ("applied" if kept else "did not complete (API error): Gen 2 kept"
+                                               if errored else "proposed, not better: Gen 2 kept")
                       + (f" · end error {e0:.0f} → {e1:.0f} mm" if e0 is not None and e1 is not None else ""))
         s.data = {"history": rc["history"]}
         publish_gen(run, 3, "Refined by the four-view critic", s.headline, rc["task"], adapter,

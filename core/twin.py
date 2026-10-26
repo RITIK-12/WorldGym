@@ -294,7 +294,9 @@ def build_twin(run: Run, video: str, prompt: str, argon: Argon, force: bool = Fa
                "before_critic": rc["start"]}
         e0, e1 = rc["start"]["end_pose_err_mm"], rc["end_pose_err_mm"]
         kept = any(h.get("kept") for h in rc["history"])
-        s.headline = ("four-view critique " + ("applied" if kept else "proposed, not better: Gen 2 kept")
+        errored = bool(rc["history"]) and all(h.get("error") for h in rc["history"])
+        s.headline = ("four-view critique " + ("applied" if kept else "did not complete (API error): Gen 2 kept"
+                                               if errored else "proposed, not better: Gen 2 kept")
                       + (f" · end error {e0:.0f} → {e1:.0f} mm" if e0 is not None and e1 is not None else ""))
         s.data = {"history": rc["history"], "dynamic": dyn}
         s.artifacts += [run.rel(Path(h["video"])) for h in rc["history"] if h.get("video")]

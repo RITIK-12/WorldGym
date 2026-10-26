@@ -50,6 +50,7 @@ TIMEOUT_S = 20 * 60
 DEFAULT_MAX_OUTPUT = 65536
 USD_PER_M_IN, USD_PER_M_OUT = 2.0, 10.0
 RETRYABLE = ("invalid json", "malformed", "please retry", "internal error", "unavailable", "deadline")
+DROPPED = ("server disconnected", "connection reset", "connection aborted", "remote end closed")
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -290,6 +291,8 @@ class Argon:
                 break
             except Exception as e:  # noqa: BLE001
                 msg = str(e)
+                if attempt < 2 and any(k in msg.lower() for k in DROPPED):
+                    continue        # the connection dropped mid-call: send the same request again
                 if attempt == 2 or not any(k in msg.lower() for k in RETRYABLE):
                     raise
                 # the server asks for the error to be included in the retry prompt

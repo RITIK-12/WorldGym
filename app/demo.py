@@ -243,7 +243,10 @@ class Demo:
     def _live_line(self, st: dict, stages: dict, gens: list[dict]) -> None:
         """One status line, replaced as the run moves on (no log)."""
         bad = next((s for s in stages.values() if s["status"] in ("failed", "refused")), None)
-        if bad is not None:
+        if bad is not None and gens:
+            msg, col = (f"Gen {gens[-1]['n']} is the result; the next step did not finish "
+                        f"({(bad.get('error') or bad['status'])[:80]})."), "#F0A020"
+        elif bad is not None:
             msg, col = f"Stopped: {(bad.get('error') or bad['status'])[:160]}", BAD
         elif self._alive():
             k = next((k for k in ORDER if st.get(k) == "running"), None)

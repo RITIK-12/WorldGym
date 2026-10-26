@@ -258,11 +258,11 @@ events={json.dumps([(e['type'], e['t'], e.get('arm'), e.get('object')) for e in 
 Attachments: the original demonstration, then the four-view video of this run (iteration {it})."""
         try:
             patch, _ = argon.ask_json(f"final_critic_iter{it}", VIEWS_SYSTEM, prompt, FinalPatch, [ref_clip, clip],
-                                      model=ARGON, thinking="high")
+                                      model=ARGON, thinking="medium")
             cand = apply_patch(best[1], patch, name=f"gen3.{it}")
             ctask = apply_scene(best[0], patch.scene)
-        except (PatchError, ValueError) as e:
-            history.append({"iteration": it, "error": str(e)[:300]})
+        except Exception as e:  # noqa: BLE001 - a dropped call or a bad patch keeps the previous generation
+            history.append({"iteration": it, "error": f"{type(e).__name__}: {str(e)[:300]}"})
             continue
         ep2 = run_episode(ctask, cand)
         err2 = end_error(ctask, ep2)
