@@ -18,6 +18,8 @@ from core.schemas import (ArmMotion, AssetRef, ObjectSpec, Part, PolicyConfig, P
 from core.scene_build import SceneDraft, _finish_assets, colour_rgba
 
 PRIMS = ("box", "cylinder", "sphere", "capsule", "tblock", "container")
+HOLD_CLEARANCE_M = 0.08      # a wipe stops this far from where another arm holds the same target
+MIDLINE_MARGIN_M = 0.03      # how far a wiping arm may reach past the midline while the other arm holds
 
 
 def robot_frame(adapter: RobotAdapter) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -93,11 +95,12 @@ def scene_from_vu(vu: VideoUnderstanding, adapter: RobotAdapter) -> SceneDraft:
 
 
 def rail_parts(size: list[float], rod_d: float) -> list[Part]:
-    """A bar / handle: two end posts, two uprights and a rod on top, filling exactly the given bounding box."""
+    """A bar / handle: two low feet, an upright at each very end and a rod across the top, filling the bounding box.
+    The uprights sit at the ends so an arm can grip the rod right next to them, as a real handle is held."""
     a = 0 if size[0] >= size[1] else 1            # long axis in the object frame
     L, W, H = size[a], size[1 - a], size[2]
-    post_l, post_h = 0.13 * L, 0.45 * H
-    up_h = H - post_h - rod_d
+    foot_l, foot_h = 0.13 * L, 0.45 * H
+    up_h = H - foot_h - rod_d
 
     def at(along: float, z: float) -> list[float]:
         v = [0.0, 0.0, round(z, 4)]
@@ -111,12 +114,11 @@ def rail_parts(size: list[float], rod_d: float) -> list[Part]:
 
     parts = []
     for sgn in (-1, 1):
-        c = sgn * (L / 2 - post_l / 2)
-        parts.append(Part(shape="box", dims_m=ext(post_l, W, post_h), pos=at(c, -H / 2 + post_h / 2)))
-        parts.append(Part(shape="cylinder", dims_m=[rod_d, rod_d, round(up_h, 4)],
-                          pos=at(c, -H / 2 + post_h + up_h / 2)))
-    rod = Part(shape="capsule", dims_m=[rod_d, rod_d, round(L - post_l, 4)], pos=at(0.0, H / 2 - rod_d / 2),
-               euler=[0.0, round(math.pi / 2, 4), 0.0] if a == 0 else [round(math.pi / 2, 4), 0.0, 0.0])
+        parts.append(Part(shape="box", dims_m=ext(foot_l, W, foot_h), pos=at(sgn * (L / 2 - foot_l / 2), -H / 2 + foot_h / 2)))
+        parts.append(Part(shape="box", dims_m=ext(rod_d, rod_d, up_h), pos=at(sgn * (L / 2 - rod_d / 2),
+                                                                               -H / 2 + foot_h + up_h / 2)))
+    # a square rod: the size of the real tube, with a flat top a tool can be pressed along without rolling off
+    rod = Part(shape="box", dims_m=ext(L, rod_d, rod_d), pos=at(0.0, H / 2 - rod_d / 2))
     return parts + [rod]
 
 
@@ -169,23 +171,54 @@ def align_with_motions(policy: PolicyConfig, task: TaskSpec, vu: VideoUnderstand
                                                         else (p.wipe_end_m, p.wipe_start_m))
             p = p.model_copy(update=up)
         prims.append(p)
-    return policy.model_copy(update={"primitives": [_physical(p, prims, obj) for p in prims]})
+    return policy.model_copy(update={"primitives": [_physical(p, prims, obj, adapter) for p in prims]})
 
 
-def _physical(p: Primitive, prims: list[Primitive], obj: dict[str, ObjectSpec]) -> Primitive:
-    """Keep a wipe physically possible: a thin tool is grasped above the table, and the strokes stop short of where
-    another arm is holding the same target."""
+def grip_limit(o: ObjectSpec) -> float:
+    """Furthest grasp point from the centre along the long side: on a rail, the rod short of its uprights."""
+    L = max(o.dims_m[0], o.dims_m[1])
+    return L / 2 - 0.045 if o.shape == "composite" else 0.45 * L
+
+
+def _physical(p: Primitive, prims: list[Primitive], obj: dict[str, ObjectSpec],
+              adapter: RobotAdapter | None = None) -> Primitive:
+    """Keep primitives physically possible: holds grip the rod, not a post; a thin tool is grasped high enough that
+    the fingertips clear the table; strokes stop short of where another arm is holding the same target."""
+    if p.kind == "hold" and p.object_id in obj:
+        o = obj[p.object_id]
+        a = 0 if o.dims_m[0] >= o.dims_m[1] else 1
+        off = list(p.grasp_xy_offset_m)
+        lim = grip_limit(o)
+        off[a] = round(float(np.clip(off[a], -lim, lim)), 4)
+        return p.model_copy(update={"grasp_xy_offset_m": off})
     if p.kind != "wipe" or p.object_id not in obj or p.target_id not in obj:
         return p
-    up = {"grasp_z_depth_m": round(min(p.grasp_z_depth_m or DEPTH, 0.45 * _top(obj[p.object_id])), 4)}
+    h = _top(obj[p.object_id])
+    # grip the top third of the tool: deeper and the fingertips jam into the surface being wiped, much shallower
+    # and the tool slips out
+    up = {"grasp_z_depth_m": round(min(p.grasp_z_depth_m or DEPTH, h / 3), 4)}
     t = obj[p.target_id]
     a = 0 if t.dims_m[0] >= t.dims_m[1] else 1
+    lo, hi = -grip_limit(t), grip_limit(t)
     for h in prims:
         if h.kind == "hold" and h.object_id == p.target_id and h.arm != p.arm:
             sh = float(h.grasp_xy_offset_m[a])
-            lim = sh - 0.08 if sh > 0 else sh + 0.08
-            clip = (lambda v: min(v, lim)) if sh > 0 else (lambda v: max(v, lim))
-            up.update(wipe_start_m=round(clip(p.wipe_start_m), 4), wipe_end_m=round(clip(p.wipe_end_m), 4))
+            if sh > 0:
+                hi = min(hi, sh - HOLD_CLEARANCE_M)
+            else:
+                lo = max(lo, sh + HOLD_CLEARANCE_M)
+    bases = arm_bases(adapter) if adapter is not None else {}
+    busy = any(h.arm != p.arm and h.kind == "hold" for h in prims)
+    if busy and p.arm in bases and len(bases) > 1:
+        # while the other arm holds, the wiping arm stays on its own side of the midline between the bases: past
+        # it, the two elbows meet (the strokes are measured along the target's long axis from its centre)
+        mid = np.mean(list(bases.values()), axis=0)
+        ax = _long_ax(t)
+        own = float(np.sign((bases[p.arm] - mid) @ ax))
+        edge = float((mid - np.array(t.xy)) @ ax) - own * MIDLINE_MARGIN_M
+        lo, hi = (max(lo, edge), hi) if own > 0 else (lo, min(hi, edge))
+    up.update(wipe_start_m=round(float(np.clip(p.wipe_start_m, lo, hi)), 4),
+              wipe_end_m=round(float(np.clip(p.wipe_end_m, lo, hi)), 4))
     return p.model_copy(update=up)
 
 
@@ -218,7 +251,9 @@ def policy_from_phases(task: TaskSpec, vu: VideoUnderstanding, adapter: RobotAda
         along_x = o.dims_m[0] >= o.dims_m[1]
         ax = np.array([math.cos(o.yaw), math.sin(o.yaw)]) if along_x else np.array([-math.sin(o.yaw), math.cos(o.yaw)])
         side = float(np.sign((bases.get(arm, np.zeros(2)) - np.array(o.xy)) @ ax) or -1.0)
-        s = side * 0.4 * L
+        said = next((m for m in vu.motions if m.arm == arm and m.kind == "hold" and m.start_frac is not None), None)
+        s = frac_to_s(said.start_frac, o, adapter) if said is not None else side * 0.4 * L
+        s = float(np.clip(s, -grip_limit(o), grip_limit(o)))
         top = _top(o)
         prims.append(Primitive(kind="hold", arm=arm, object_id=o.id,
                                grasp_xy_offset_m=[round(s, 4), 0.0] if along_x else [0.0, round(s, 4)],
@@ -281,3 +316,15 @@ def demonstrated_motion(vu: VideoUnderstanding) -> str:
             "arm's role, the stroke direction (start_frac -> end_frac, -1 = the robot's right end, +1 = its left "
             "end), the number of passes, the pattern (one_way / back_and_forth) and place_back; fix HOW it is done "
             "(grasp points, heights, speeds, positions):\n" + json.dumps(rows))
+
+
+def keep_structure(extracted: PolicyConfig, reference: PolicyConfig) -> PolicyConfig:
+    """Gen 2 keeps one primitive per arm with the role the architect gave it (Gen 1's structure). An extracted
+    primitive replaces Gen 1's only when it is the same arm, kind and objects; label glitches that invent extra
+    holds or swap an arm's role are dropped."""
+    prims = []
+    for ref in reference.primitives:
+        match = next((p for p in extracted.primitives if p.arm == ref.arm and p.kind == ref.kind
+                      and p.object_id == ref.object_id and p.target_id == ref.target_id), None)
+        prims.append(match.model_copy(update={"sync_after": ref.sync_after}) if match is not None else ref)
+    return extracted.model_copy(update={"primitives": prims})
