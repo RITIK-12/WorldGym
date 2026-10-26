@@ -257,9 +257,12 @@ class VUObject(Strict):
     colour: str
     size_guess_m: list[float]
     # layout in the robot frame (+x forward from the base / the midpoint between the arm bases, +y the robot's left)
-    offset_m: list[float] | None = None    # [x, y] of the object's centre
+    description: str = ""                  # what it is, in plain words ("ceramic mug", "kitchen sponge")
+    offset_m: list[float] | None = None    # [x, y] of the object's centre at the start
+    end_offset_m: list[float] | None = None  # [x, y] at the end of the video, when it moved
     long_axis: str = "none"                # "x" (front-back) | "y" (left-right) | "none"
     fixed: bool = False                    # clamped / fixture: does not move during the video
+    behaviour: str = "rigid"               # rigid | articulated | deformable
     placement: str = ""                    # where it is relative to the arms and the other objects
     role: str = ""                         # its role in the demonstrated actions
     asset: str | None = None               # NVIDIA SimReady asset name chosen with the search tool
@@ -294,6 +297,7 @@ class ArmMotion(Strict):
     pattern: str = ""                      # "one_way" (every pass start -> end) | "back_and_forth"
     place_back: bool | None = None         # the object goes back to where it was picked up
     after: str = ""                        # what happens to the object at the end
+    contact: str = ""                      # which part of the gripper touches which surface of the object
     summary: str = ""
 
 

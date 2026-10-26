@@ -42,8 +42,13 @@ def scene_from_vu(vu: VideoUnderstanding, adapter: RobotAdapter) -> SceneDraft:
     base_yaw = math.atan2(f[1], f[0])
     tools = {p.object for p in vu.phases if p.object}
     surfaces = {p.target for p in vu.phases if p.target}
-    wiped = {p.target for p in vu.phases if p.target and p.action in ("push", "wipe")}
-    grasped = {p.object for p in vu.phases if p.object and p.action in ("grasp", "lift", "hold", "transit", "push")}
+    contact = ("push", "wipe")
+    wiped = ({p.target for p in vu.phases if p.target and p.action in contact}
+             | {m.target for m in vu.motions if m.target and m.kind in contact})
+    grasped = ({p.object for p in vu.phases if p.object and p.action not in ("reach", "idle", "retract")}
+               | {m.object for m in vu.motions if m.object and m.kind != "idle"})
+    tools |= {m.object for m in vu.motions if m.object}
+    surfaces |= {m.target for m in vu.motions if m.target}
     fit = 0.7 * min(a.gripper.max_width_m for a in adapter.arms)   # a grasped part must fit between the fingers
     objs, preds = [], []
     for o in vu.objects:
@@ -68,9 +73,14 @@ def scene_from_vu(vu: VideoUnderstanding, adapter: RobotAdapter) -> SceneDraft:
             shape = o.type if o.type in PRIMS else "box"
             objs.append(ObjectSpec(shape=shape, dims_m=[round(v, 4) for v in size], yaw=round(base_yaw, 4),
                                    **{**kw, "is_fixed": fixed or shape == "container"}))
-    wipers = {p.object for p in vu.phases if p.object and p.target and p.action in ("push", "wipe")}
+    wipers = ({p.object for p in vu.phases if p.object and p.target and p.action in contact}
+              | {m.object for m in vu.motions if m.object and m.target and m.kind in contact})
+    ids = {o.id for o in objs}
+    for m in vu.motions:
+        if m.kind in contact and m.object in ids and m.target in ids:
+            preds.append(Predicate(kind="wiped_coverage", object_id=m.object, target_id=m.target, limit=0.5))
     for p in vu.phases:
-        if p.object and p.target and p.action in ("push", "wipe"):
+        if p.object and p.target and p.action in contact:
             preds.append(Predicate(kind="wiped_coverage", object_id=p.object, target_id=p.target, limit=0.5))
         elif p.object and p.target and p.action in ("place", "release") and p.object not in wipers:
             t = next((x for x in objs if x.id == p.target), None)

@@ -1,10 +1,9 @@
-"""Video Architect: one Argon multimodal call on the clip + keyframes -> VideoUnderstanding.
+"""Video Architect: one Argon call (plus SimReady search tool turns) on the clip, keyframes and rendered robot models.
 
-Argon identifies the robot (closest Menagerie model), the objects (shape vocabulary + full-extent size guesses),
-task phases, per-keyframe robot/object boxes and the gripper point/open/held state, a rest frame for the camera
-solve and a verbal camera estimate. A review pass draws those labels onto the keyframes and Argon corrects its own
-mistakes (the render-watch-fix loop applied to perception). Gemini Robotics-ER 2 subagents (spatial pointing specialists) then label extra
-frames densely, in parallel batches, for tracking and motion extraction.
+It returns the robot (picked against rendered candidates), every object with what it is, its size, position, long
+axis, behaviour and SimReady asset, one motion entry per arm (kind, contact, start and end along the target,
+passes, direction) and the timed phases. Nothing in the prompt is specific to a task: the video decides. Gemini
+Robotics-ER 2 subagents then label frames densely, in parallel batches, for tracking and motion extraction.
 
 Coordinates follow the Gemini convention: boxes [ymin, xmin, ymax, xmax] and points [y, x], normalised 0..1000.
 """
@@ -25,18 +24,18 @@ from core.schemas import Keyframe, VideoUnderstanding
 SHAPES = ("box, cylinder, sphere, capsule, tblock (T-shaped block), container (open bin/box/tray), "
           "rail (a bar or handle: a horizontal rod on two end posts)")
 
-SYSTEM = """You are the Video Architect of WorldGym, a system that turns one video of a robot doing a tabletop
-manipulation task into a physics twin in MuJoCo. You watch the video and keyframes carefully and report what is
-physically there, as structured data. Be precise about geometry: boxes must tightly enclose the visible pixels of
-each item in that exact keyframe. Never invent objects that are not visible. If unsure, give your best estimate and
-lower the confidence; never refuse."""
+SYSTEM = """You are the Video Architect of WorldGym. WorldGym turns one video of a robot doing a manipulation task
+into a MuJoCo simulation that repeats the same action. Any robot, any objects, any task: the video decides what is
+there and what happens, never the prompt and never an assumption about the task type. You watch the whole clip
+before you describe anything, you report only what is physically visible, and you measure sizes and positions
+against the robot itself. When unsure, give your best estimate and lower the confidence; never refuse."""
 
 CONVENTIONS = """Conventions:
 - Boxes: [ymin, xmin, ymax, xmax] normalised to 0..1000 of the keyframe image. Points: [y, x] normalised 0..1000.
-- The gripper point `uv` is the midpoint between the fingertips (the grasp centre), even when closed.
 - Times are seconds from the start of the video.
-- Robot frame: origin at the robot base on the table, +x = the robot's forward direction (from its base toward the
-  workspace), +y = the robot's left, +z up.
+- Robot frame, in metres: origin at the robot base on the table (for two arms, the midpoint between the two arm
+  bases), +x = forward from the base(s) across the workspace, +y = the robot's left, +z up. "Left end" and
+  "right end" always mean the robot's left and right.
 - camera_guess = {"azimuth_deg": direction from the robot base to the camera, measured around +z from +x
   (0 = camera in front of the robot looking back at it, 90 = camera on the robot's left, -90 = on its right),
   "elevation_deg": angle above the table plane, "distance_m": distance from the robot base}."""
@@ -85,66 +84,80 @@ def understand(video: str | Path, probe: dict, prompt: str, argon: Argon, out_di
     times = _dedupe(times, 0.4)[:16]
     frames = extract_frames(video, times, out_dir / "keyframes", prefix="kf")
     small = downscale(video, out_dir / "clip_small.mp4", max_s=max(dur + 1.0, 30.0))  # same time base as keyframes
-    models = menagerie_models()
     from core.robot_onboard import ARM_CANDIDATES, render_candidates
 
     sheet = STATE_DIR / "robot_candidates.jpg"     # deterministic renders, shared by every run
     if not sheet.exists():
         sheet.parent.mkdir(parents=True, exist_ok=True)
         render_candidates(ARM_CANDIDATES, sheet)
-    text = f"""TASK PROMPT FROM THE USER: "{prompt}"
+    text = f"""User prompt: "{prompt}"
 
-The video is attached (clip_small.mp4, {dur:.1f} s, original {probe.get('width')}x{probe.get('height')}).{_trim_note(probe)}
-Keyframes are attached as JPEGs with these timestamps:
+Attachments: the video (clip_small.mp4, {dur:.1f} s, original {probe.get('width')}x{probe.get('height')}).{_trim_note(probe)}
+then keyframes as JPEGs:
 {_kf_list(frames, times)}
-robot_candidates.jpg (the last attachment) shows rendered robot models for the robot identification.
+then robot_candidates.jpg: rendered MuJoCo robot models, each labelled with its directory name, two views each.
 
-Robot models available (MuJoCo Menagerie directories): {', '.join(models)}
-Object shape vocabulary: {SHAPES}.
+Object types: {SHAPES}.
 
 {CONVENTIONS}
 
-Produce:
-- robot: make_model_guess, arms (1 or 2), gripper type, confidence 0..1, and menagerie_dir chosen by comparing
-  the real arm with robot_candidates.jpg (rendered MuJoCo models, each labelled with its directory, two views).
-  Judge the whole arm: link shapes and colours (white/grey shells vs all-black links), proportions, joint layout,
-  gripper design; wrist close-ups alone are ambiguous. menagerie_dir must be one of: {', '.join(ARM_CANDIDATES)}.
-- objects: every object the robot manipulates plus containers, fixtures and obstacles on the table (not the table
-  itself). Miss nothing the robot touches. id = short snake_case with colour (e.g. red_cube, white_sponge,
-  silver_bar). type from the vocabulary. colour = a plain colour word. size_guess_m = FULL extents [x, y, z] in the
-  robot frame, in metres (cylinder: [diameter, diameter, height]); use the robot's known size as the scale reference.
-  Layout, in the robot frame (for two arms the origin is the midpoint between the two arm bases):
-  offset_m = [x, y] of the object's centre at the start of the video; long_axis = "x" if its long side points
-  forward/back, "y" if it runs left-right (e.g. parallel to the line between two arm bases), "none" if it has no
-  long side; fixed = true when it is clamped or never moves; placement = one sentence of where it is relative to
-  the arms and the other objects; role = what it does in the task (e.g. "wiping tool held by the right arm",
-  "surface being wiped, held by the left arm").
-  asset: call search_simready_assets for each real product (sponge, cup, bottle, can, tool, box...) and set the name
-  of the candidate whose shape and size match; null when nothing matches (bars, custom fixtures, plain blocks).
-- phases: contiguous phases covering the task, with t0, t1, action (one of reach, grasp, lift, transit, place,
-  release, retract, push, idle), arm ("arm" for single-arm robots, "left"/"right" for dual-arm), object, target.
-- motions: one entry per arm summarising what it does over the whole clip (the structure the simulation must
-  reproduce): kind (hold, wipe, pick_place, push, idle), object (in its gripper), target, t0/t1, and for contact
-  motions start_frac / end_frac = where the tool starts and ends along the target's long side (-1 = the robot's
-  right end, +1 = its left end), strokes = number of passes over the target, pattern = "one_way" when every pass
-  goes the same direction (e.g. repeated right-to-left swipes, lifting back between them, or one sweep that
-  progresses right to left) or "back_and_forth" when it scrubs both ways, place_back = whether the object returns
-  to where it was picked, after = what happens to it at the end (e.g. "moved straight right and dropped on the
-  mat"), summary = one sentence. Watch the direction carefully; do not assume back-and-forth.
-- keyframes: exactly one entry per attached keyframe, using its exact t: robot_box, object_boxes for every visible
-  object id, gripper = [{{arm, uv, open, held}}] (held = object id or null).
-- rest_frame_t: one of the keyframe times where the robot is at a rest/home pose and fully visible.
-- success_intent: one sentence of what success means for this task.
-- camera_guess."""
+Work in this order, then return ONE JSON object.
+
+1. Watch the whole clip. Find the phases and the moments of contact: which arm touches what, with which part of
+   its gripper, and what the other arm is doing at that time.
+
+2. robot: make_model_guess, arms (1 or 2), gripper type, confidence 0..1, and menagerie_dir: compare the real arm
+   with robot_candidates.jpg by the whole arm (link shapes and colours, proportions, joint layout, gripper), not
+   by a wrist close-up. menagerie_dir must be one of: {', '.join(ARM_CANDIDATES)}.
+
+3. objects: every object the robot touches, plus anything that holds, supports or blocks them (containers,
+   fixtures, stands, obstacles). Not the table or mat itself. For each:
+   - id: short snake_case, colour + noun (e.g. red_mug, blue_cube, wooden_board). description: what it is.
+   - type from the object types; colour: one plain colour word; behaviour: rigid, articulated or deformable.
+   - size_guess_m: full extents [x, y, z] in the robot frame (cylinder: [diameter, diameter, height]). A size is
+     a claim: measure it against the gripper and the arm links in the frames, and check it from more than one
+     keyframe because a single view hides depth.
+   - offset_m: [x, y] of its centre at the start; end_offset_m: where it is at the end, if it moved.
+   - long_axis: "x" (long side points forward/back), "y" (long side runs left-right) or "none".
+   - fixed: true if it never moves (clamped, mounted, too heavy to move).
+   - placement: one sentence on where it is relative to the arms and the other objects.
+   - role: what it does in the task, in a few words.
+   - asset: call search_simready_assets with what the object is (its description, not its colour) for every
+     object that is a real product; you may search for several objects at once. Each result has a metric
+     bounding box and a thumbnail: pick the candidate whose kind and proportions match the object and set its
+     name, or null when nothing fits (custom fixtures, plain blocks, rods, parts of the rig).
+
+4. motions: one entry per arm for the whole clip, the structure the simulation must reproduce:
+   - kind: what the arm does, e.g. hold, pick_place, wipe, push, pour, insert, open, close, press, handover,
+     idle (use another single word if none fits).
+   - object: what is in its gripper; target: what it acts on or puts it onto; t0, t1.
+   - contact: which part of the gripper touches which surface of the object.
+   - for motions along a target's surface: start_frac and end_frac = where the contact starts and ends along the
+     target's long side (-1 = its right end, +1 = its left end); strokes = number of passes; pattern = "one_way"
+     when every pass goes the same direction, "back_and_forth" when it alternates. Watch the direction of every
+     pass; do not assume.
+   - place_back: whether the object ends where it was picked up; after: what happens to it at the end.
+   - summary: one sentence.
+
+5. phases: contiguous phases covering the clip with t0, t1, action (a short verb such as reach, grasp, lift,
+   transit, place, release, retract, push, wipe, pour, insert, open, hold, idle), arm ("arm" for one arm,
+   "left"/"right" for two), object, target.
+
+6. keyframes: exactly one entry per keyframe with its exact t: robot_box and object_boxes for every visible
+   object id (leave gripper empty; a labelling swarm does that frame by frame).
+
+7. rest_frame_t: a keyframe time where the robot is at rest and fully visible. success_intent: one sentence
+   comparing the first state and the last state. camera_guess."""
     try:   # the architect picks SimReady assets itself while it watches the clip
         from core.argon import ask_with_tools
         from core.assets import TOOL, run_tool
 
         vu, resp = ask_with_tools(argon, "video_architect", SYSTEM, text, VideoUnderstanding,
-                                  {TOOL["name"]: (TOOL, run_tool)}, [small, *frames, sheet], max_rounds=4)
+                                  {TOOL["name"]: (TOOL, run_tool)}, [small, *frames, sheet], thinking="medium",
+                                  max_rounds=4)
     except Exception:  # noqa: BLE001 - the twin needs the understanding more than the asset choice
         vu, resp = argon.ask_json("video_architect", SYSTEM, text, VideoUnderstanding, [small, *frames, sheet],
-                                  model=ARGON, thinking="high")
+                                  model=ARGON, thinking="medium")
     snap = {round(t, 2) for t in times}
     for kf in vu.keyframes:
         kf.t = min(snap, key=lambda s: abs(s - kf.t))
