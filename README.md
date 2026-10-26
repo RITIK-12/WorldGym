@@ -69,4 +69,4 @@ uv run python -m app.demo        # open http://localhost:8080
 - [OpenUSD](https://openusd.org)
 - [Viser](https://github.com/nerfstudio-project/viser)
 - Gemini 4 Argon, Gemini Robotics-ER 2 and Antigravity Managed Agents (Gemini Interactions API)
-- RoboSimStudio, UC Berkeley and NVIDIA, arXiv:2610.18835
+- [RoboSimStudio](https://github.com/robosimstudio/robosimstudio), UC Berkeley and NVIDIA, arXiv:2610.18835
