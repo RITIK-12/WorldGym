@@ -140,7 +140,9 @@ def svg(w: int, h: int, body: str) -> str:
     defs = (f'<defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" '
             f'orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="{LINE}"/></marker>'
             f'<marker id="tail" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="9" markerHeight="9" '
-            f'orient="auto"><path d="M10,0 L0,5 L10,10 z" fill="{LINE}"/></marker></defs>')
+            f'orient="auto"><path d="M10,0 L0,5 L10,10 z" fill="{LINE}"/></marker>'
+            f'<pattern id="hatch" patternUnits="userSpaceOnUse" width="9" height="9" patternTransform="rotate(45)">'
+            f'<line x1="0" y1="0" x2="0" y2="9" stroke="#A5D8FF" stroke-width="2.5"/></pattern></defs>')
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
             f'font-family="{FONT}"><rect width="{w}" height="{h}" fill="#fff"/>{defs}{body}</svg>')
 
@@ -216,6 +218,88 @@ def architecture() -> str:
     return svg(W, H, "".join(b))
 
 
+def box(x: float, y: float, w: float, h: float, fill: str, stroke: str, title: str, sub: str = "",
+        size: int = 20, dashed: bool = False, hatch: bool = False) -> str:
+    """Rounded box with centred text; (x, y) is the centre."""
+    dash = ' stroke-dasharray="9 7"' if dashed else ""
+    out = f'<rect x="{x - w / 2}" y="{y - h / 2}" width="{w}" height="{h}" rx="16" fill="{fill}" stroke="{stroke}" ' \
+          f'stroke-width="2.2"{dash}/>'
+    if hatch:
+        out += f'<rect x="{x - w / 2}" y="{y - h / 2}" width="{w}" height="{h}" rx="16" fill="url(#hatch)" opacity="0.6"/>'
+    lines = [(t, size, "600", INK) for t in title.split("\n")] + [(t, 15, "400", "#343A40") for t in sub.split("\n")
+                                                                 if sub]
+    y0 = y - (len(lines) - 1) * 11 + 6
+    out += "".join(f'<text x="{x}" y="{y0 + k * 22:.0f}" text-anchor="middle" font-size="{sz}" font-weight="{wt}" '
+                   f'fill="{c}">{t}</text>' for k, (t, sz, wt, c) in enumerate(lines))
+    return out
+
+
+def link(a: tuple[float, float], b: tuple[float, float], text: str = "", dx: float = 0, dy: float = -12) -> str:
+    """Two-way straight connector, as in a system diagram."""
+    return arrow([a, b], text, at=0.5, dx=dx, dy=dy, two_way=True)
+
+
+def agents() -> str:
+    """Agent hierarchy: one orchestrator, three phase agents, and what each agent fans out to."""
+    W, H = 1600, 760
+    BLUE_F, BLUE_S = "#A5D8FF", "#1971C2"
+    PURPLE_F, PURPLE_S = "#E5DBFF", "#7048E8"
+    ORANGE_F, ORANGE_S = "#FFD8A8", "#E8590C"
+    OR = (800, 110)
+    AY, AH, AW = 370, 136, 400
+    VA, SW, FC = (300, AY), (800, AY), (1300, AY)
+    CY = 610                                                    # children row
+    b = [box(*OR, 600, 120, BLUE_F, BLUE_S, "Orchestrator", "runs the three phases, checks each agent's typed "
+             "output,\nkeeps a fix only if the score improves", size=24),
+         box(*VA, AW, AH, PURPLE_F, PURPLE_S, "Phase 1: Video Architect", "Gemini 4 Argon, one call\nrobot, objects, "
+             "assets, layout,\nwhat each arm does", size=21),
+         box(*SW, AW, AH, PURPLE_F, PURPLE_S, "Phase 2: Labelling swarm", "Gemini Robotics-ER 2\ngripper points and "
+             "object boxes\nfor every frame, in parallel", size=21),
+         box(*FC, AW, AH, PURPLE_F, PURPLE_S, "Phase 3: Four-view Critic", "Gemini 4 Argon\nwatches the clip next to "
+             "4 views\nof the simulation, patches it", size=21)]
+    # orchestrator -> agents (org-chart connector)
+    bus_y = 240
+    b.append(f'<path d="M{OR[0]},{OR[1] + 62} V{bus_y} M{VA[0]},{bus_y} H{FC[0]}" fill="none" stroke="{LINE}" '
+             f'stroke-width="2"/>')
+    for x in (VA[0], SW[0], FC[0]):
+        b.append(arrow([(x, bus_y), (x, AY - AH / 2 - 4)]))
+    # phase 1: tool
+    b += [box(VA[0], CY, 280, 96, ORANGE_F, ORANGE_S, "NVIDIA SimReady search", "tool the architect calls\n"
+              "to pick real 3D assets", size=18),
+          arrow([(VA[0], AY + AH / 2 + 4), (VA[0], CY - 52)], "tool call", dx=48, dy=0, two_way=True)]
+    # phase 2: sixteen workers
+    cols, mw, mh, gap = 8, 46, 40, 10
+    gx0 = SW[0] - (cols * mw + (cols - 1) * gap) / 2
+    rows_y = (CY - 30, CY + 20)
+    b.append(f'<path d="M{SW[0]},{AY + AH / 2 + 2} V{CY - 70} M{gx0 + mw / 2},{CY - 70} '
+             f'H{gx0 + (cols - 1) * (mw + gap) + mw / 2}" fill="none" stroke="{LINE}" stroke-width="2"/>')
+    for k in range(cols):
+        x = gx0 + k * (mw + gap)
+        b.append(arrow([(x + mw / 2, CY - 70), (x + mw / 2, rows_y[0] - mh / 2 - 3)]))
+    for r, yy in enumerate(rows_y):
+        for k in range(cols):
+            x = gx0 + k * (mw + gap)
+            b.append(f'<rect x="{x}" y="{yy - mh / 2}" width="{mw}" height="{mh}" rx="8" fill="{PURPLE_F}" '
+                     f'stroke="{PURPLE_S}" stroke-width="1.6"/>'
+                     f'<text x="{x + mw / 2}" y="{yy + 5}" text-anchor="middle" font-size="13" fill="{INK}">'
+                     f'ER {r * cols + k + 1}</text>')
+    b.append(f'<text x="{SW[0]}" y="{CY + 72}" text-anchor="middle" font-size="15" fill="#343A40">16 Robotics-ER '
+             f'agents, 8 frames each, all at once</text>')
+    # phase 3: two rounds
+    R1, R2 = (FC[0] - 105, CY), (FC[0] + 105, CY)
+    b += [box(*R1, 160, 96, PURPLE_F, PURPLE_S, "Round 1", "scene edits +\npolicy patch", size=18),
+          box(*R2, 160, 96, PURPLE_F, PURPLE_S, "Round 2", "sees why round 1\nwas not kept", size=18),
+          f'<path d="M{FC[0]},{AY + AH / 2 + 2} V{CY - 76} M{R1[0]},{CY - 76} H{R2[0]}" fill="none" '
+          f'stroke="{LINE}" stroke-width="2"/>',
+          arrow([(R1[0], CY - 76), (R1[0], CY - 52)]), arrow([(R2[0], CY - 76), (R2[0], CY - 52)]),
+          arrow([(R1[0] + 82, CY), (R2[0] - 84, CY)])]
+    # phase order note
+    b.append(f'<text x="{W / 2}" y="{H - 28}" text-anchor="middle" font-size="16" fill="{INK2}">Phase 2 starts as '
+             f'soon as Phase 1 returns. Every result is checked against its contract and scored before the next '
+             f'phase uses it.</text>')
+    return svg(W, H, "".join(b))
+
+
 # ----------------------------------------------------------------------------------------------------------------------
 # pipeline
 # ----------------------------------------------------------------------------------------------------------------------
@@ -263,6 +347,6 @@ def pipeline() -> str:
 
 if __name__ == "__main__":
     OUT.mkdir(exist_ok=True)
-    (OUT / "architecture.svg").write_text(architecture())
+    (OUT / "architecture.svg").write_text(agents())
     (OUT / "pipeline.svg").write_text(pipeline())
     print("wrote", OUT / "architecture.svg", OUT / "pipeline.svg")
