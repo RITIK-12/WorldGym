@@ -2,7 +2,7 @@
 
 **Turn any robot video into simulation.**
 
-![WorldGym demo UI](worldgym.jpg)
+![WorldGym: original robot video next to its Gen 3 MuJoCo simulation](media/worldgym_preview.gif)
 
 Gemini 4 Argon watches a robot video, identifies the robot, finds real 3D assets for every object and rebuilds the
 scene in MuJoCo with each arm doing what it did. It then watches its own simulation next to the original clip and
@@ -70,3 +70,4 @@ uv run python -m app.demo        # open http://localhost:8080
 - [Viser](https://github.com/nerfstudio-project/viser)
 - Gemini 4 Argon, Gemini Robotics-ER 2 and Antigravity Managed Agents (Gemini Interactions API)
 - [RoboSimStudio](https://github.com/robosimstudio/robosimstudio), UC Berkeley and NVIDIA, arXiv:2610.18835
+- Demo video source: the bar wiping clip from the [RoboSimStudio real2sim project page](https://robosimstudio.github.io/)
