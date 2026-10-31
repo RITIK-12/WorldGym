@@ -9,10 +9,15 @@
   /* Night game. The field is the page; controls float on liquid glass. */
   :root {
     --night: #070d0a;
-    --glass: rgba(255, 255, 255, 0.075);
-    --glass-strong: rgba(255, 255, 255, 0.14);
-    --edge: rgba(255, 255, 255, 0.22);
-    --edge-soft: rgba(255, 255, 255, 0.08);
+    /* liquid glass: the ritik.io toolbar's dark-theme values */
+    --glass-bg: rgba(23, 22, 26, 0.45);
+    --glass-stroke: rgba(255, 255, 255, 0.1);
+    --glass-highlight: rgba(255, 255, 255, 0.16);
+    --glass-shine: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 45%);
+    --glass-lift: 0 22px 60px -12px rgba(0, 0, 0, 0.6), 0 6px 18px rgba(0, 0, 0, 0.35);
+    --glass-blur: 30px;
+    --glass-saturate: 180%;
+    --glass-active: rgba(42, 41, 47, 0.65);
     --ink: #f4f6f2;
     --ink-dim: rgba(244, 246, 242, 0.62);
     --ball: #ffb43a;
@@ -29,16 +34,12 @@
   #stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 
   .glass {
-    position: relative; background: var(--glass); border: 1px solid var(--edge-soft);
-    -webkit-backdrop-filter: blur(22px) saturate(180%); backdrop-filter: blur(22px) saturate(180%);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), inset 0 -1px 0 rgba(255, 255, 255, 0.04),
-                0 12px 40px rgba(0, 0, 0, 0.38);
+    position: relative; background: var(--glass-bg);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    box-shadow: var(--glass-lift), inset 0 1px 0 var(--glass-highlight), inset 0 0 0 1px var(--glass-stroke);
   }
-  .glass::before {                       /* specular sheen across the top edge */
-    content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0) 42%);
-    mask: linear-gradient(#000, #000); opacity: 0.9;
-  }
+  .glass::before { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; background: var(--glass-shine); }
   button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
   button:focus-visible, input:focus-visible { outline: 2px solid var(--ball); outline-offset: 3px; }
   svg { display: block; }
@@ -66,8 +67,8 @@
   #pitch:active { transform: scale(0.94); }
   #pitch:disabled { filter: grayscale(0.7) brightness(0.7); cursor: wait; }
   .icon-btn { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center;
-              background: rgba(255, 255, 255, 0.06); color: var(--ink-dim); }
-  .icon-btn[aria-pressed="true"] { background: var(--glass-strong); color: var(--ball); }
+              background: transparent; color: var(--ink-dim); }
+  .icon-btn[aria-pressed="true"] { background: var(--glass-active); color: var(--ball); box-shadow: inset 0 0 0 1px var(--glass-stroke); }
 
   .cams { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); top: 50%; transform: translateY(-50%);
           display: grid; gap: 8px; padding: 8px; border-radius: 26px; }
@@ -178,8 +179,10 @@ const BALL_R = 0.0366, BALL_M = 0.145;             // regulation baseball
 const AIR = 1.225, CD = 0.35;                     // air density, baseball drag coefficient
 const COR = 0.50;                                 // wood bat on ball
 const DT = 0.002;                                 // physics step (s)
-const MOUND_M = 9.0;                              // batting-practice machine distance, behind an L-screen
-const FENCE_M = 12.5, FENCE_H = 1.2;              // robot-scale field: a 1.3 m robot swinging at a third of human bat speed
+// Little League field: the G1 is Little League sized (1.3 m)
+const MOUND_M = 14.02;                            // pitching distance, 46 ft
+const BASE_M = 18.29;                             // base paths, 60 ft
+const FENCE_M = 61.0, FENCE_H = 1.8;              // outfield wall, 200 ft
 const RELEASE_Z = 1.02;                           // the machine's wheel gap
 const MPH = 0.44704;
 
@@ -231,11 +234,11 @@ renderer.toneMappingExposure = 0.85;
 $("stage").appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#070d0a");
-scene.fog = new THREE.Fog("#070d0a", 26, 60);
+scene.fog = new THREE.Fog("#070d0a", 45, 120);
 const world = new THREE.Group();
 world.rotation.x = -Math.PI / 2;
 scene.add(world);
-const camera = new THREE.PerspectiveCamera(32, 1, 0.05, 200);
+const camera = new THREE.PerspectiveCamera(20, 1, 0.1, 300);
 { // night sky: deep blue at the zenith fading to the stadium haze at the horizon
   const c = document.createElement("canvas"); c.width = 2; c.height = 256;
   const g = c.getContext("2d"), grad = g.createLinearGradient(0, 0, 0, 256);
@@ -266,29 +269,59 @@ function stripes() {
   for (let i = 0; i < 16; i++) { g.fillStyle = i % 2 ? "#285a33" : "#2e6539"; g.fillRect(0, i * 64, 1024, 64); }
   return new THREE.CanvasTexture(c);
 }
-const grass = new THREE.Mesh(new THREE.CircleGeometry(55, 96), new THREE.MeshStandardMaterial({ map: stripes(), roughness: 0.95 }));
-grass.receiveShadow = true; grass.position.set(plate.x, plate.y, -0.002); grass.rotation.z = ang; world.add(grass);
+// field geometry in the plate frame: u along the pitch line (toward center field), v toward third base
+const at = (u, v, z = 0) => plate.clone().addScaledVector(toP, u).addScaledVector(side, v).setZ(z);
+const flat = (geo, mat, p, rot = 0, z = 0.001) => {
+  const m = new THREE.Mesh(geo, mat); m.position.set(p.x, p.y, z); m.rotation.z = rot; m.receiveShadow = true; world.add(m); return m;
+};
 const clay = new THREE.MeshStandardMaterial({ color: "#8f6040", roughness: 1 });
-const disc = (r, p) => { const m = new THREE.Mesh(new THREE.CircleGeometry(r, 64), clay); m.position.set(p.x, p.y, 0.001); m.receiveShadow = true; world.add(m); };
-disc(2.6, plate); disc(2.3, mound);
-const infield = new THREE.Mesh(new THREE.RingGeometry(MOUND_M * 0.97, MOUND_M * 1.5, 64, 1, ang - Math.PI / 4, Math.PI / 2), clay);
-infield.position.set(plate.x, plate.y, 0.0005); infield.receiveShadow = true; world.add(infield);
+const infieldGrass = new THREE.MeshStandardMaterial({ color: "#2b6136", roughness: 0.95 });
 const chalk = new THREE.MeshBasicMaterial({ color: "#efeadf" });
-for (const s of [-1, 1]) {
-  const a = ang + s * Math.PI / 4, L = FENCE_M + 0.5;
-  const line = new THREE.Mesh(new THREE.PlaneGeometry(L, 0.05), chalk);
-  line.position.set(plate.x + Math.cos(a) * L / 2, plate.y + Math.sin(a) * L / 2, 0.003); line.rotation.z = a; world.add(line);
+flat(new THREE.CircleGeometry(FENCE_M + 6, 128), new THREE.MeshStandardMaterial({ map: stripes(), roughness: 0.95 }), plate, ang, 0.0);
+// warning track and infield skin: dirt fans out from home plate across fair territory
+flat(new THREE.RingGeometry(FENCE_M - 3.0, FENCE_M + 0.2, 96, 1, ang - Math.PI / 4 - 0.02, Math.PI / 2 + 0.04), clay, plate, 0, 0.012);
+flat(new THREE.CircleGeometry(MOUND_M + 15.24, 96, ang - Math.PI / 4 - 0.12, Math.PI / 2 + 0.24), clay, plate, 0, 0.010);
+// infield grass: the square inside the base paths, inset by the 3 ft dirt base path
+const diamond = new THREE.Shape();
+const dg = (BASE_M - 0.9) / Math.SQRT2;
+diamond.moveTo(1.6, 0); diamond.lineTo(dg + 0.4, dg - 1.2); diamond.lineTo(2 * dg - 0.6, 0); diamond.lineTo(dg + 0.4, -(dg - 1.2)); diamond.closePath();
+flat(new THREE.ShapeGeometry(diamond), infieldGrass, plate, ang, 0.020);
+flat(new THREE.CircleGeometry(2.74, 64), clay, mound, 0, 0.030);                 // pitcher's mound, 18 ft circle
+flat(new THREE.CircleGeometry(3.05, 64), clay, plate, 0, 0.030);                 // home plate circle
+const rubber = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.46, 0.02), chalk);
+rubber.position.set(mound.x, mound.y, 0.08); rubber.rotation.z = ang; world.add(rubber);
+const moundHill = new THREE.Mesh(new THREE.SphereGeometry(2.6, 32, 12, 0, Math.PI * 2, 0, 0.22), clay);
+moundHill.rotation.x = Math.PI / 2; moundHill.position.set(mound.x, mound.y, -2.54); moundHill.receiveShadow = true; world.add(moundHill);
+// bases: 1B to the right of the pitch line seen from home, 3B to the left, 2B straight out
+const bag = new THREE.MeshStandardMaterial({ color: "#f6f3ec", roughness: 0.7 });
+for (const [u, v] of [[BASE_M / Math.SQRT2, -BASE_M / Math.SQRT2], [BASE_M * Math.SQRT2, 0], [BASE_M / Math.SQRT2, BASE_M / Math.SQRT2]]) {
+  const p = at(u, v);
+  flat(new THREE.CircleGeometry(1.4, 32), clay, p, 0, 0.028);
+  const b = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.38, 0.06), bag); b.position.set(p.x, p.y, 0.03); b.rotation.z = ang + Math.PI / 4; b.castShadow = true; world.add(b);
+}
+for (const s of [-1, 1]) {                            // foul lines out to the poles
+  const a = ang + s * Math.PI / 4, L = FENCE_M;
+  flat(new THREE.PlaneGeometry(L, 0.07), chalk, plate.clone().add(new THREE.Vector3(Math.cos(a) * L / 2, Math.sin(a) * L / 2, 0)), a, 0.04);
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 9, 12), new THREE.MeshStandardMaterial({ color: "#ffd23a", emissive: "#5a4a00" }));
+  pole.rotation.x = Math.PI / 2; pole.position.set(plate.x + Math.cos(a) * FENCE_M, plate.y + Math.sin(a) * FENCE_M, 4.5); world.add(pole);
+}
+const box = (len, w, p, rot) => flat(new THREE.PlaneGeometry(len, w), chalk, p, rot, 0.04);
+for (const sgn of [-1, 1]) {                          // batter's boxes, 4 x 6 ft (lines only)
+  const c = at(0.1, sgn * 0.95);
+  for (const dv of [-0.61, 0.61]) box(1.83, 0.05, c.clone().addScaledVector(side, dv), ang);
+  for (const du of [-0.91, 0.91]) box(1.22, 0.05, c.clone().addScaledVector(toP, du), ang + Math.PI / 2);
 }
 const plateMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.012, 5), new THREE.MeshStandardMaterial({ color: "#f3efe6" }));
-plateMesh.rotation.x = Math.PI / 2; plateMesh.rotation.y = ang + Math.PI / 2; plateMesh.position.set(plate.x, plate.y, 0.006); world.add(plateMesh);
-const wallMat = new THREE.MeshStandardMaterial({ color: "#10301f", roughness: 0.85 });
+plateMesh.rotation.x = Math.PI / 2; plateMesh.rotation.y = ang + Math.PI / 2; plateMesh.position.set(plate.x, plate.y, 0.045); world.add(plateMesh);
+// the outfield wall: padded panels along the fair-territory arc, a yellow home-run line on top
+const wallMat = new THREE.MeshStandardMaterial({ color: "#0f2c1d", roughness: 0.85 });
 const capMat = new THREE.MeshBasicMaterial({ color: "#ffb43a" });
-const PANELS = 48, ARC = Math.PI / 2, panelW = FENCE_M * ARC / PANELS + 0.02;
+const PANELS = 120, ARC = Math.PI / 2, panelW = FENCE_M * ARC / PANELS + 0.04;
 for (let k = 0; k < PANELS; k++) {
   const a = ang - ARC / 2 + (k + 0.5) * ARC / PANELS;
   const x = plate.x + Math.cos(a) * FENCE_M, y = plate.y + Math.sin(a) * FENCE_M;
-  const p = new THREE.Mesh(new THREE.BoxGeometry(0.12, panelW, FENCE_H), wallMat); p.position.set(x, y, FENCE_H / 2); p.rotation.z = a; world.add(p);
-  const c = new THREE.Mesh(new THREE.BoxGeometry(0.14, panelW, 0.05), capMat); c.position.set(x, y, FENCE_H + 0.025); c.rotation.z = a; world.add(c);
+  const p = new THREE.Mesh(new THREE.BoxGeometry(0.3, panelW, FENCE_H), wallMat); p.position.set(x, y, FENCE_H / 2); p.rotation.z = a; world.add(p);
+  const c = new THREE.Mesh(new THREE.BoxGeometry(0.32, panelW, 0.08), capMat); c.position.set(x, y, FENCE_H + 0.04); c.rotation.z = a; world.add(c);
 }
 
 // ---------- the pitching machine: tripod, two counter-rotating wheels, chute and a hopper of balls ----------
@@ -326,22 +359,6 @@ for (let k = 0; k < 9; k++) {
   b.position.set(0.56 + Math.cos(k * 2.1) * 0.09 * (k % 3), Math.sin(k * 2.1) * 0.09 * (k % 3), RELEASE_Z + 0.52 + 0.05 * Math.floor(k / 3));
   machine.add(b);
 }
-{ // L-screen in front of the machine: a padded frame with a net
-  const screen = new THREE.Group();
-  const pipe = new THREE.MeshStandardMaterial({ color: "#20262a", metalness: 0.5, roughness: 0.5 });
-  const net = new THREE.MeshStandardMaterial({ color: "#0d1012", transparent: true, opacity: 0.55, side: THREE.DoubleSide });
-  const W = 1.5, H = 2.0;
-  for (const [x0, z0, x1, z1] of [[-W / 2, 0, -W / 2, H], [W / 2, 0, W / 2, 1.0], [-W / 2, H, 0, H], [0, H, 0, 1.0], [0, 1.0, W / 2, 1.0], [-W / 2, 0.02, W / 2, 0.02]]) {
-    const len = Math.hypot(x1 - x0, z1 - z0), p = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, len, 10), pipe);
-    p.position.set(0, (x0 + x1) / 2, (z0 + z1) / 2); p.rotation.x = Math.atan2(x1 - x0, z1 - z0) * -1; screen.add(p);
-  }
-  const lower = new THREE.Mesh(new THREE.PlaneGeometry(W, 1.0), net); lower.rotation.x = Math.PI / 2; lower.rotation.y = Math.PI / 2; lower.position.set(0, 0, 0.5); screen.add(lower);
-  const upper = new THREE.Mesh(new THREE.PlaneGeometry(W / 2, 1.0), net); upper.rotation.x = Math.PI / 2; upper.rotation.y = Math.PI / 2; upper.position.set(0, -W / 4, 1.5); screen.add(upper);
-  screen.position.set(mound.x - toP.x * 1.1, mound.y - toP.y * 1.1, 0);
-  screen.rotation.z = ang;
-  screen.traverse((o) => { o.castShadow = true; });
-  world.add(screen);
-}
 machine.position.set(mound.x, mound.y, 0);
 machine.rotation.z = ang;                             // local +x points away from the plate, so the wheel gap faces it
 machine.traverse((o) => { o.castShadow = true; });
@@ -377,15 +394,16 @@ key.target.position.copy(toThree(plate));
 rim.position.copy(toThree(plate.clone().addScaledVector(toP, -6).addScaledVector(side, -4).setZ(5)));
 
 // ---------- cameras ----------
-const CAMS = {
-  machine: () => [mound.clone().addScaledVector(toP, 2.4).setZ(1.85), plate.clone().addScaledVector(toP, 0.5).setZ(0.8)],
-  catcher: () => [plate.clone().addScaledVector(toP, -3.0).setZ(1.35), plate.clone().addScaledVector(toP, 6).setZ(1.0)],
-  side: () => [plate.clone().addScaledVector(side, -5.2).addScaledVector(toP, 1.4).setZ(1.4), plate.clone().addScaledVector(toP, 0.4).setZ(0.8)],
-  top: () => [plate.clone().addScaledVector(toP, 5.5).setZ(15), plate.clone().addScaledVector(toP, 6)],
+const CAMS = {   // [eye, look-at, vertical field of view]
+  machine: () => [mound.clone().addScaledVector(toP, 3.6).addScaledVector(side, 0.5).setZ(2.6), plate.clone().addScaledVector(toP, 0.4).setZ(0.75), 20],
+  catcher: () => [plate.clone().addScaledVector(toP, -3.2).setZ(1.4), plate.clone().addScaledVector(toP, 8).setZ(1.0), 45],
+  side: () => [plate.clone().addScaledVector(side, -6.5).addScaledVector(toP, 1.4).setZ(1.5), plate.clone().addScaledVector(toP, 0.6).setZ(0.8), 34],
+  top: () => [plate.clone().addScaledVector(toP, 16).setZ(42), plate.clone().addScaledVector(toP, 22), 50],
 };
 function setCam(name) {
-  const [eye, at] = CAMS[name]();
-  camera.position.copy(toThree(eye)); controls.target.copy(toThree(at)); controls.update();
+  const [eye, look, fov] = CAMS[name]();
+  camera.fov = fov; camera.updateProjectionMatrix();
+  camera.position.copy(toThree(eye)); controls.target.copy(toThree(look)); controls.update();
   for (const b of $("cams").children) b.setAttribute("aria-pressed", String(b.dataset.cam === name));
 }
 $("cams").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setCam(b.dataset.cam); });
