@@ -334,13 +334,15 @@ for (const s of [-1, 1]) {                            // foul lines out to the p
   pole.rotation.x = Math.PI / 2; pole.position.set(plate.x + Math.cos(a) * FENCE_M, plate.y + Math.sin(a) * FENCE_M, 4.5); world.add(pole);
 }
 const box = (len, w, p, rot) => flat(new THREE.PlaneGeometry(len, w), chalk, p, rot, 0.04);
-for (const sgn of [-1, 1]) {                          // batter's boxes, 4 x 6 ft (lines only)
-  const c = at(0.1, sgn * 0.95);
-  for (const dv of [-0.61, 0.61]) box(1.83, 0.05, c.clone().addScaledVector(side, dv), ang);
-  for (const du of [-0.91, 0.91]) box(1.22, 0.05, c.clone().addScaledVector(toP, du), ang + Math.PI / 2);
+for (const sgn of [-1, 1]) {                          // Little League batter's boxes: 3 x 6 ft, 6 in off the plate, 3 in chalk
+  const c = at(0, sgn * (0.2159 + 0.1524 + 0.4572));
+  for (const dv of [-0.4572, 0.4572]) box(1.83, 0.076, c.clone().addScaledVector(side, dv), ang);
+  for (const du of [-0.9144, 0.9144]) box(0.99, 0.076, c.clone().addScaledVector(toP, du), ang + Math.PI / 2);
 }
-const plateMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.012, 5), new THREE.MeshStandardMaterial({ color: "#f3efe6" }));
-plateMesh.rotation.x = Math.PI / 2; plateMesh.rotation.y = ang + Math.PI / 2; plateMesh.position.set(plate.x, plate.y, 0.045); world.add(plateMesh);
+// home plate: 17 in across the front, 8.5 in sides, 12 in edges to the point; its midpoint sits on `plate`
+const plateShape = new THREE.Shape([[0.2159, -0.2159], [0.2159, 0.2159], [0, 0.2159], [-0.2159, 0], [0, -0.2159]].map(([u, v]) => new THREE.Vector2(u, v)));
+const plateMesh = new THREE.Mesh(new THREE.ShapeGeometry(plateShape), new THREE.MeshStandardMaterial({ color: "#f3efe6" }));
+plateMesh.rotation.z = ang; plateMesh.position.set(plate.x, plate.y, 0.045); world.add(plateMesh);
 // the outfield wall: padded panels along the fair-territory arc, a yellow home-run line on top
 const wallMat = new THREE.MeshStandardMaterial({ color: "#0f2c1d", roughness: 0.85 });
 const capMat = new THREE.MeshBasicMaterial({ color: "#ffb43a" });
@@ -421,17 +423,13 @@ key.position.copy(toThree(plate.clone().addScaledVector(side, 6).addScaledVector
 key.target.position.copy(toThree(plate));
 rim.position.copy(toThree(plate.clone().addScaledVector(toP, -6).addScaledVector(side, -4).setZ(5)));
 
-// ---------- strike zone (rulebook): the hollow below the kneecap up to midway between shoulders and belt,
-// over the 17 in plate, read off the batter's stance; a pitch is a strike if any part of the ball touches it ----------
+// ---------- strike zone, as MLB's automated ball-strike system draws it (2026): a flat 17 in wide rectangle at the
+// plate's midpoint, from 27% to 53.5% of the batter's standing height; a strike if any part of the ball touches it ----------
 const PLATE_HALF = 0.2159;
-const zoneU = 0.22;                                   // the plate's front edge, along the pitch line
-const SZ = (() => {
-  setSwing(0); mj.mj_kinematics(model, data);
-  const z = (n) => data.xpos[bodyId(n) * 3 + 2];
-  const knee = (z("left_knee_link") + z("right_knee_link")) / 2, belt = z("pelvis");
-  const shoulder = (z("left_shoulder_pitch_link") + z("right_shoulder_pitch_link")) / 2;
-  return { bot: knee - 0.03, top: (shoulder + belt) / 2 };
-})();
+const G1_HEIGHT = 1.32;                               // Unitree G1, standing
+const zoneU = 0;                                      // the plate's midpoint, 8.5 in behind its front edge
+const SZ = { bot: 0.27 * G1_HEIGHT, top: 0.535 * G1_HEIGHT };
+const zoneMats = [];                                  // drawn over everything, like a broadcast graphic
 const zoneAt = (lat, z) => plate.clone().addScaledVector(toP, zoneU).addScaledVector(side, lat).setZ(z);
 {
   const pts = [], hw = PLATE_HALF, b = SZ.bot, t = SZ.top;
@@ -439,19 +437,19 @@ const zoneAt = (lat, z) => plate.clone().addScaledVector(toP, zoneU).addScaledVe
   seg(zoneAt(-hw, b), zoneAt(hw, b)); seg(zoneAt(hw, b), zoneAt(hw, t)); seg(zoneAt(hw, t), zoneAt(-hw, t)); seg(zoneAt(-hw, t), zoneAt(-hw, b));
   const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
   const edge = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: "#ffffff", transparent: true, opacity: 0.95, depthTest: false }));
-  edge.renderOrder = 10; world.add(edge);
+  edge.renderOrder = 10; world.add(edge); zoneMats.push(edge.material);
   const fillPts = [], third = (t - b) / 3, w3 = 2 * hw / 3;
   for (let k = 1; k < 3; k++) { const a = zoneAt(-hw, b + k * third), c = zoneAt(hw, b + k * third); fillPts.push(a.x, a.y, a.z, c.x, c.y, c.z);
                                 const e = zoneAt(-hw + k * w3, b), f = zoneAt(-hw + k * w3, t); fillPts.push(e.x, e.y, e.z, f.x, f.y, f.z); }
   const g2 = new THREE.BufferGeometry(); g2.setAttribute("position", new THREE.Float32BufferAttribute(fillPts, 3));
   const grid = new THREE.LineSegments(g2, new THREE.LineBasicMaterial({ color: "#ffffff", transparent: true, opacity: 0.3, depthTest: false }));
-  grid.renderOrder = 10; world.add(grid);
+  grid.renderOrder = 10; world.add(grid); zoneMats.push(grid.material);
   const pane = new THREE.Mesh(new THREE.PlaneGeometry(2 * hw, t - b), new THREE.MeshBasicMaterial({ color: "#9fd4ff", transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false, depthTest: false }));
-  pane.renderOrder = 9;
+  pane.renderOrder = 9; zoneMats.push(pane.material);
   const c = zoneAt(0, (b + t) / 2); pane.position.set(c.x, c.y, c.z); pane.rotation.set(Math.PI / 2, ang + Math.PI / 2, 0, "ZYX"); world.add(pane);
 }
 const pitchDot = new THREE.Mesh(new THREE.SphereGeometry(BALL_R * 1.3, 16, 12), new THREE.MeshBasicMaterial({ color: "#9ef0a4", depthTest: false }));
-pitchDot.renderOrder = 11;
+pitchDot.renderOrder = 11; zoneMats.push(pitchDot.material);
 pitchDot.visible = false; world.add(pitchDot);
 function callPitch(p) {                               // p: where the ball crossed the front of the plate
   const rel = p.clone().sub(plate), lat = rel.dot(side);
@@ -460,39 +458,196 @@ function callPitch(p) {                               // p: where the ball cross
   return strike;
 }
 
-// ---------- the catcher: squats behind the plate, moves the mitt to the pitch, catches whatever gets past ----------
+// ---------- the catcher: an adult (1.83 m) in gear, squatting behind the plate. He sets a target, tracks the pitch with
+// his mitt, receives it (the mitt closes and gives), frames it, moves it to his throwing hand and lobs it back to the machine.
+// Rig in his own frame: +x toward the machine, +y his left, +z up; legs and arms solved with two-bone IK every frame. ----------
 const catcherAt = plate.clone().addScaledVector(toP, -0.85);
+const CATCH_X = 0.3;                                  // where he receives, in front of his feet
+const catchU = CATCH_X - 0.85;                        // the same plane, along the pitch line from the plate
+const V3 = (x, y, z) => new THREE.Vector3(x, y, z);
+const cLocal = (p) => { const d = p.clone().sub(catcherAt); return V3(d.dot(toP), d.dot(side), p.z); };
+const cDir = (v) => V3(v.dot(toP), v.dot(side), v.z);
+const cWorld = (l) => catcherAt.clone().addScaledVector(toP, l.x).addScaledVector(side, l.y).setZ(l.z);
 const catcher = new THREE.Group();
-{
-  const gear = new THREE.MeshStandardMaterial({ color: "#1f2f4f", roughness: 0.6 });
-  const pants = new THREE.MeshStandardMaterial({ color: "#d9d6cf", roughness: 0.8 });
-  const black = new THREE.MeshStandardMaterial({ color: "#111", roughness: 0.5, metalness: 0.3 });
-  const limb = (a, b, r, mat) => { const L = a.distanceTo(b), m = new THREE.Mesh(new THREE.CapsuleGeometry(r, L, 6, 12), mat);
-    m.position.copy(a.clone().add(b).multiplyScalar(0.5)); m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize()); catcher.add(m); };
-  const V = (x, y, z) => new THREE.Vector3(x, y, z);     // local: +x toward the machine, +y left, +z up
-  for (const s of [-1, 1]) {                            // squat: hips low, knees forward and out
-    limb(V(-0.05, s * 0.12, 0.42), V(0.22, s * 0.2, 0.40), 0.065, pants);
-    limb(V(0.22, s * 0.2, 0.40), V(0.08, s * 0.2, 0.06), 0.055, gear);
-    limb(V(0.08, s * 0.2, 0.06), V(0.2, s * 0.2, 0.03), 0.04, black);
-  }
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.36, 0.42), gear); torso.position.set(0.02, 0, 0.66); torso.rotation.y = 0.25; catcher.add(torso);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 14), black); head.position.set(0.08, 0, 0.98); catcher.add(head);
-  const mask = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.18, 0.2), new THREE.MeshStandardMaterial({ color: "#2a2a2a", metalness: 0.6, roughness: 0.4 }));
-  mask.position.set(0.19, 0, 0.96); catcher.add(mask);
-  limb(V(0.05, -0.19, 0.82), V(0.22, -0.24, 0.55), 0.045, gear);   // throwing hand resting behind the knee
+catcher.position.set(catcherAt.x, catcherAt.y, 0); catcher.rotation.z = ang; world.add(catcher);
+const ctMat = (color, o = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.65, ...o });
+const skin = ctMat("#b97a56", { roughness: 0.55 }), jersey = ctMat("#1b2840"), pants = ctMat("#d6d2c8", { roughness: 0.85 });
+const gearM = ctMat("#24407a", { roughness: 0.38, metalness: 0.2 }), trim = ctMat("#ffb43a", { roughness: 0.5 }), cleat = ctMat("#111", { roughness: 0.45 });
+const cageM = ctMat("#1d2023", { metalness: 0.85, roughness: 0.3 }), leather = ctMat("#8a5426", { roughness: 0.5 }), leatherDk = ctMat("#4a2a12", { roughness: 0.7 });
+const _bx = new THREE.Vector3(), _by = new THREE.Vector3(), _bz = new THREE.Vector3(), _bm = new THREE.Matrix4(), FWD = V3(1, 0, 0), UP = V3(0, 0, 1);
+function orient(o, y, hint) {                          // o's +y along y, its +z toward the hint
+  _by.copy(y).normalize(); _bx.crossVectors(_by, hint).normalize(); _bz.crossVectors(_bx, _by);
+  o.quaternion.setFromRotationMatrix(_bm.makeBasis(_bx, _by, _bz));
 }
-catcher.position.set(catcherAt.x, catcherAt.y, 0); catcher.rotation.z = ang;
-catcher.traverse((o) => { o.castShadow = true; }); world.add(catcher);
-const mitt = new THREE.Mesh(new THREE.SphereGeometry(0.13, 20, 14), new THREE.MeshStandardMaterial({ color: "#7a4a22", roughness: 0.7 }));
-mitt.scale.set(0.45, 1, 1); mitt.castShadow = true; world.add(mitt);
-const mittHome = catcherAt.clone().addScaledVector(toP, 0.42).addScaledVector(side, 0.1).setZ((SZ.bot + SZ.top) / 2);
-const mittPos = mittHome.clone(), mittGoal = mittHome.clone();
-const catchU = -0.62;                                 // the mitt's plane, behind the plate along the pitch line
+function limbMesh(r0, r1, mat, depth = 1) {           // a unit tapered limb along +y, radius r0 at its root
+  const g = new THREE.CylinderGeometry(r1, r0, 1, 16, 1); g.translate(0, 0.5, 0); g.scale(1, 1, depth);
+  const m = new THREE.Mesh(g, mat); catcher.add(m); return m;
+}
+function span(m, a, b, hint = FWD) { orient(m, b.clone().sub(a), hint); m.position.copy(a); m.scale.y = a.distanceTo(b); }
+function joint(r, mat, sx = 1, sy = 1, sz = 1) { const m = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12), mat); m.scale.set(sx, sy, sz); catcher.add(m); return m; }
+function twoBone(a, t, l1, l2, pole) {                // returns the knee/elbow and the reachable end
+  const d = t.clone().sub(a), L = THREE.MathUtils.clamp(d.length(), Math.abs(l1 - l2) + 1e-3, (l1 + l2) * 0.999), u = d.normalize();
+  const x = (l1 * l1 - l2 * l2 + L * L) / (2 * L), h = Math.sqrt(Math.max(0, l1 * l1 - x * x));
+  const p = pole.clone().addScaledVector(u, -pole.dot(u)).normalize();
+  return [a.clone().addScaledVector(u, x).addScaledVector(p, h), a.clone().addScaledVector(u, L)];
+}
+// body parts
+const C = {
+  pelvis: joint(0.14, pants, 1.25, 0.9, 0.85),
+  torso: new THREE.Group(), head: new THREE.Group(), mitt: new THREE.Group(),
+  thigh: [limbMesh(0.09, 0.065, pants), limbMesh(0.09, 0.065, pants)], knee: [joint(0.068, gearM), joint(0.068, gearM)],
+  shin: [limbMesh(0.068, 0.055, gearM, 0.85), limbMesh(0.068, 0.055, gearM, 0.85)], foot: [limbMesh(0.045, 0.038, cleat, 0.7), limbMesh(0.045, 0.038, cleat, 0.7)],
+  upper: [limbMesh(0.055, 0.045, jersey), limbMesh(0.055, 0.045, jersey)], elbow: [joint(0.045, jersey), joint(0.045, jersey)],
+  fore: [limbMesh(0.042, 0.033, skin), limbMesh(0.042, 0.033, jersey)], shoulder: [joint(0.07, gearM), joint(0.07, gearM)],
+  neck: limbMesh(0.05, 0.048, skin), hand: joint(0.045, skin, 0.9, 1, 1.25),
+};
+{ // trunk: jersey, a segmented chest protector with an orange trim, padded shoulders
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.15, 1, 18).translate(0, 0.5, 0).scale(1, 1, 0.66), jersey);
+  const shell = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.17, 0.86, 18, 1, true, -1.3, 2.6).translate(0, 0.5, 0).scale(1, 1, 0.78), gearM);
+  shell.material = gearM.clone(); shell.material.side = THREE.DoubleSide;
+  C.torso.add(trunk, shell);
+  for (const [y, r] of [[0.2, 0.178], [0.42, 0.185], [0.64, 0.193], [0.92, 0.203]]) {   // arcs across the front, over the shell
+    const ridge = new THREE.Mesh(new THREE.TorusGeometry(r, 0.008, 6, 20, 2.6).rotateZ(Math.PI / 2 - 1.3).rotateX(Math.PI / 2).scale(1, 1, 0.78), trim);
+    ridge.position.y = y; C.torso.add(ridge);
+  }
+  catcher.add(C.torso);
+}
+{ // head: face behind a hockey-style catcher's helmet with a wire cage and a throat guard (+x = gaze)
+  const face = new THREE.Mesh(new THREE.SphereGeometry(0.092, 18, 14), skin); face.position.set(0.012, 0, -0.012);
+  const shell = new THREE.Mesh(new THREE.SphereGeometry(0.128, 26, 16, Math.PI + 0.85, 2 * Math.PI - 1.7, 0, 0.62 * Math.PI).rotateX(Math.PI / 2), gearM);
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(0.13, 26, 8, 0, 2 * Math.PI, 0, 0.28 * Math.PI).rotateX(Math.PI / 2), gearM);
+  C.head.add(face, shell, cap);
+  for (const [z, r] of [[0.03, 0.135], [-0.02, 0.138], [-0.07, 0.132], [-0.11, 0.12]]) {
+    const bar = new THREE.Mesh(new THREE.TorusGeometry(r, 0.0055, 6, 18, 1.9).rotateZ(-0.95), cageM); bar.position.z = z; C.head.add(bar);
+  }
+  for (const y of [-0.035, 0.035]) {
+    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.0055, 0.0055, 0.16, 6), cageM); bar.rotation.x = Math.PI / 2; bar.position.set(0.134, y, -0.04); C.head.add(bar);
+  }
+  const throat = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.07, 0.08), cageM); throat.position.set(0.1, 0, -0.17); C.head.add(throat);
+  catcher.add(C.head);
+}
+const hinges = [];
+{ // catcher's mitt (+x = pocket face, +z = fingers, thumb toward -y): padded rim and pocket in two halves that fold shut
+  const back = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), leather); back.scale.set(0.055, 0.135, 0.15); back.position.x = -0.035;
+  C.mitt.add(back);
+  for (const s of [1, -1]) {
+    const hinge = new THREE.Group(); hinge.scale.y = s;
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.11, 0.036, 10, 18, Math.PI).rotateY(Math.PI / 2), leather);
+    const pocket = new THREE.Mesh(new THREE.CircleGeometry(0.11, 16, 0, Math.PI).rotateY(Math.PI / 2), leatherDk);
+    pocket.position.x = -0.004;
+    hinge.add(rim, pocket); hinges.push(hinge); C.mitt.add(hinge);
+  }
+  const web = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.05, 0.07), leatherDk); web.position.set(0.0, 0, 0.115); C.mitt.add(web);
+  catcher.add(C.mitt);
+}
+catcher.traverse((o) => { o.castShadow = true; });
+// the squat and the poses he moves between (his frame)
+const ANKLE = [V3(0.03, 0.3, 0.1), V3(0.0, -0.3, 0.1)], TOE = [V3(0.2, 0.34, 0.025), V3(0.17, -0.34, 0.025)];
+const HIP = V3(-0.22, 0, 0.5), NECK = V3(-0.01, 0, 0.94);
+const MITT_HOME = V3(CATCH_X, 0.02, (SZ.bot + SZ.top) / 2), MITT_CHEST = V3(0.16, 0.02, 0.8), MITT_POINT = V3(0.3, 0.14, 0.95);
+const HAND_BACK = V3(-0.33, -0.1, 0.6), HAND_COCK = V3(-0.04, -0.34, 1.2), HAND_FOLLOW = V3(0.36, -0.12, 0.98);
+const ct = { mode: "set", t: 0, pos: MITT_HOME.clone(), vel: V3(0, 0, 0), goal: MITT_HOME.clone(), close: 0, give: 0, frame: V3(0, 0, 0),
+             hand: HAND_BACK.clone(), hvel: V3(0, 0, 0), hgoal: HAND_BACK.clone(), n: FWD.clone(), held: null };
+const heldAt = new THREE.Vector3();                   // where the ball sits while he holds it (world)
+const hopperAt = mound.clone().addScaledVector(toP, 0.56).setZ(RELEASE_Z + 0.5);
+function spring(p, v, goal, w, dt) {                   // critically damped
+  for (let k = 0, n = Math.ceil(dt / 0.005), h = dt / n; k < n; k++) {
+    v.addScaledVector(goal.clone().sub(p), w * w * h).multiplyScalar(1 - 2 * w * h); p.addScaledVector(v, h);
+  }
+}
+function catcherSet(target) {                         // he sets up where the pitch is aimed
+  const l = cLocal(target); ct.mode = "set"; ct.t = 0; ct.held = null; ct.close = 0; ct.frame.set(0, 0, 0);
+  ct.goal.set(CATCH_X, THREE.MathUtils.clamp(l.y, -0.45, 0.5), THREE.MathUtils.clamp(l.z, 0.25, 1.15)); ct.hgoal.copy(HAND_BACK);
+}
+function catcherCatch(p) {
+  ct.mode = "catch"; ct.t = 0; ct.held = "mitt"; ct.pos.copy(cLocal(p)); ct.vel.set(0, 0, 0); ct.goal.copy(ct.pos);
+  // framing: a pitch just off the zone gets a quiet pull toward it
+  const zc = cLocal(plate.clone().setZ((SZ.bot + SZ.top) / 2)), off = V3(0, zc.y - ct.pos.y, zc.z - ct.pos.z);
+  ct.frame.copy(off.multiplyScalar(Math.min(0.035, off.length() * 0.2) / Math.max(off.length(), 1e-6)));
+}
+function throwBack(from) {                            // a lob into the machine's hopper, about a second in the air
+  const T = 1.05, v = hopperAt.clone().sub(from).divideScalar(T); v.z += 0.5 * 9.81 * T;
+  sim.inMitt = false; sim.phase = "return"; placeBall(from, v); ct.held = null;
+}
+function catcherUpdate(dt) {
+  ct.t += dt;
+  const bp = ballPos(), bl = cLocal(bp), flying = sim.phase === "flight" || sim.phase === "tipped";
+  if (ct.mode === "set" && flying && sim.t > sim.launchAt + 0.1) ct.mode = "track";
+  if (ct.mode === "track") {
+    if (flying) {                                       // predict where the ball crosses his receiving plane
+      const v = cDir(ballVel());
+      if (v.x < -1 && bl.x > CATCH_X) {
+        const T = (bl.x - CATCH_X) / -v.x;
+        ct.goal.set(CATCH_X, bl.y + v.y * T, bl.z + v.z * T - 4.9 * T * T);
+        ct.goal.y = THREE.MathUtils.clamp(ct.goal.y, -0.55, 0.6); ct.goal.z = THREE.MathUtils.clamp(ct.goal.z, 0.15, 1.3);
+        ct.n.copy(v).negate().normalize().lerp(FWD, 0.4).normalize();
+      }
+    } else if (!sim.inMitt) { ct.mode = "set"; ct.goal.copy(MITT_HOME); }     // put in play
+  }
+  let give = 0;
+  if (ct.mode === "catch") {                           // pocket shuts, the mitt gives a few cm, then sticks and frames
+    ct.close = Math.min(1, ct.t / 0.05);
+    give = ct.t < 0.06 ? ct.t / 0.06 : Math.exp(-(ct.t - 0.06) / 0.12);
+    ct.goal.copy(ct.pos);
+    if (ct.t > 0.75) { ct.mode = "transfer"; ct.t = 0; }
+  } else if (ct.mode === "transfer") {                 // mitt to the chest, the bare hand meets it and takes the ball
+    ct.goal.copy(MITT_CHEST); ct.n.copy(V3(0.2, -1, 0.1)).normalize();
+    ct.hgoal.copy(MITT_CHEST).add(V3(0.06, -0.09, 0));
+    if (ct.t > 0.32) { ct.held = "hand"; ct.close = Math.max(0, 1 - (ct.t - 0.32) / 0.1); }
+    if (ct.t > 0.42) { ct.mode = "throw"; ct.t = 0; }
+  } else if (ct.mode === "throw") {                    // short arm action from the squat: cock behind the ear, release, follow through
+    ct.goal.copy(MITT_POINT); ct.n.copy(FWD);
+    ct.hgoal.copy(ct.t < 0.22 ? HAND_COCK : HAND_FOLLOW);
+    if (ct.held === "hand" && ct.t > 0.3) throwBack(heldAt.clone());
+    if (ct.t > 0.75) { ct.mode = "set"; ct.goal.copy(MITT_HOME); ct.hgoal.copy(HAND_BACK); ct.n.copy(FWD); }
+  } else if (ct.mode === "set") ct.n.lerp(FWD, Math.min(1, dt * 6)).normalize();
+  if (ct.mode !== "catch") spring(ct.pos, ct.vel, ct.goal, ct.mode === "track" ? 22 : 9, dt);
+  else { const k = ct.t > 0.12 ? Math.min(1, dt * 8) : 0; ct.pos.addScaledVector(ct.frame, k); ct.frame.multiplyScalar(1 - k); }
+  spring(ct.hand, ct.hvel, ct.hgoal, ct.mode === "throw" ? 26 : 12, dt);
+  // the mitt frame: face toward the ball, fingers up; tipped forward for low balls, turned over for backhands
+  const pocket = ct.pos.clone().addScaledVector(FWD, -0.06 * give);
+  const low = THREE.MathUtils.clamp((0.5 - pocket.z) / 0.25, 0, 1), back = THREE.MathUtils.clamp((-0.02 - pocket.y) * 1.6, 0, 0.7);
+  const n = ct.n.clone(), f = UP.clone().addScaledVector(FWD, 0.9 * low).add(V3(0, back, 0));
+  f.addScaledVector(n, -f.dot(n)).normalize();
+  const sAx = new THREE.Vector3().crossVectors(f, n);
+  C.mitt.quaternion.setFromRotationMatrix(_bm.makeBasis(n, sAx, f)); C.mitt.position.copy(pocket);
+  hinges[0].rotation.z = -0.8 * ct.close; hinges[1].rotation.z = 0.8 * ct.close;
+  const wrist = pocket.clone().addScaledVector(f, -0.1).addScaledVector(n, -0.05);
+  // the body follows the mitt: weight shifts sideways, the chest leans in when the reach runs out
+  const lat = THREE.MathUtils.clamp(pocket.y * 0.3, -0.1, 0.1);
+  const hip = HIP.clone().add(V3(0, lat, 0)), neck = NECK.clone().add(V3(0, lat * 1.4, 0));
+  const shoulders = (nk) => [nk.clone().add(V3(-0.02, 0.19, -0.04)), nk.clone().add(V3(-0.02, -0.19, -0.04))];
+  let [shL] = shoulders(neck);
+  const short = wrist.distanceTo(shL) - 0.56;
+  if (short > 0) neck.addScaledVector(wrist.clone().sub(shL).normalize(), Math.min(short, 0.2));
+  const [sL, sR] = shoulders(neck);
+  C.pelvis.position.copy(hip); orient(C.pelvis, neck.clone().sub(hip), FWD);
+  C.torso.position.copy(hip); orient(C.torso, neck.clone().sub(hip), FWD); C.torso.scale.y = hip.distanceTo(neck);
+  for (let s = 0; s < 2; s++) {
+    const hj = hip.clone().add(V3(0, s ? -0.1 : 0.1, -0.03));
+    const [knee, ankle] = twoBone(hj, ANKLE[s], 0.45, 0.45, V3(1, s ? -0.45 : 0.45, 0.35));
+    span(C.thigh[s], hj, knee); C.knee[s].position.copy(knee);
+    span(C.shin[s], knee, ankle); span(C.foot[s], ankle, TOE[s], UP);
+  }
+  const [eL, wL] = twoBone(sL, wrist, 0.3, 0.27, V3(-0.2, 0.8, -1));
+  span(C.upper[0], sL, eL); C.elbow[0].position.copy(eL); span(C.fore[0], eL, wL);
+  const [eR, wR] = twoBone(sR, ct.hand, 0.3, 0.27, ct.mode === "throw" ? V3(-0.3, -1, 0.2) : V3(-0.4, -1, -0.5));
+  span(C.upper[1], sR, eR); C.elbow[1].position.copy(eR); span(C.fore[1], eR, wR); C.hand.position.copy(wR);
+  C.shoulder[0].position.copy(sL); C.shoulder[1].position.copy(sR);
+  // head: eyes on the ball while it is live, on the machine otherwise
+  const headC = neck.clone().add(V3(0.05, 0, 0.17)), look = flying || sim.phase === "batted" ? bl : cLocal(release);
+  span(C.neck, neck, headC.clone().add(V3(0, 0, -0.08)));
+  C.head.position.copy(headC);
+  const gaze = look.clone().sub(headC).normalize(), hy = new THREE.Vector3().crossVectors(UP, gaze).normalize();
+  C.head.quaternion.setFromRotationMatrix(_bm.makeBasis(gaze, hy, new THREE.Vector3().crossVectors(gaze, hy)));
+  if (ct.held === "mitt") heldAt.copy(cWorld(pocket.clone().addScaledVector(n, 0.015)));
+  else if (ct.held === "hand") heldAt.copy(cWorld(wR.clone().addScaledVector(FWD, 0.04)));
+}
 
 // ---------- cameras ----------
 const CAMS = {   // [eye, look-at, vertical field of view]
   machine: () => [mound.clone().addScaledVector(toP, 7.5).setZ(3.4), plate.clone().addScaledVector(toP, 1.2).setZ(0.7), 22],
-  catcher: () => [plate.clone().addScaledVector(toP, -3.4).setZ(1.5), plate.clone().addScaledVector(toP, 8).setZ(1.0), 45],
+  catcher: () => [plate.clone().addScaledVector(toP, -3.6).setZ(1.9), plate.clone().addScaledVector(toP, 8).setZ(0.55), 45],
   side: () => [plate.clone().addScaledVector(side, -6.5).addScaledVector(toP, 1.4).setZ(1.5), plate.clone().addScaledVector(toP, 0.6).setZ(0.8), 34],
   top: () => [plate.clone().addScaledVector(toP, 16).setZ(42), plate.clone().addScaledVector(toP, 22), 50],
 };
@@ -505,6 +660,7 @@ function setCam(name, snap = true) {
   const [eye, look, fov] = CAMS[name](); aimShot(eye, look, fov);
   if (snap) { camera.position.copy(shot.eye); controls.target.copy(shot.look); camera.fov = fov; camera.updateProjectionMatrix(); controls.update(); }
   for (const b of $("cams").children) b.setAttribute("aria-pressed", String(b.dataset.cam === name));
+  for (const m of zoneMats) m.depthTest = name === "catcher";        // from behind him, the catcher hides the zone
 }
 controls.addEventListener("start", () => { director = false; });   // the viewer took the camera
 $("cams").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setCam(b.dataset.cam); });
@@ -685,8 +841,7 @@ function pitch() {
   $("pitch").disabled = true;
   pitchDot.visible = false;
   trailN = 0; trailGeo.setDrawRange(0, 0);
-  // the catcher sets up where the ball will arrive
-  mittGoal.copy(target).addScaledVector(toP, catchU - contact.clone().sub(plate).dot(toP));
+  catcherSet(target);                                   // the catcher sets up where the pitch is aimed
   if (camMode === "machine") setCam("machine", false);
 }
 $("pitch").addEventListener("click", pitch);
@@ -703,7 +858,7 @@ $("auto").addEventListener("click", () => {
 });
 function finish(word, kind, nums) {
   hud(word, kind, nums); drawTally(); sim.phase = "done";
-  setTimeout(() => { if (sim.phase === "done") { if (camMode === "machine") setCam("machine", false); if (!sim.inMitt) mittGoal.copy(mittHome); } }, 2200);
+  setTimeout(() => { if ((sim.phase === "done" || sim.phase === "return") && camMode === "machine") setCam("machine", false); }, 2200);
   setTimeout(() => { $("pitch").disabled = false; }, 500);
   clearTimeout(autoTimer);
   if ($("auto").getAttribute("aria-pressed") === "true") autoTimer = setTimeout(pitch, 2600);
@@ -715,13 +870,18 @@ function step() {
   if (policyMode && policy && sim.t >= sim.swingAt) policyStep();
   else { pol.on = false; setSwing(Math.max(0, sim.t - sim.swingAt)); }
   if (sim.phase === "pitch" && sim.t >= sim.launchAt) { placeBall(release, sim.v); sim.phase = "flight"; wheelSpin = 60; }
-  if (sim.inMitt) { placeBall(mittPos, new THREE.Vector3()); }
+  if (sim.inMitt) { placeBall(heldAt, new THREE.Vector3()); }
   else if (sim.phase === "idle" || sim.phase === "pitch") { placeBall(PARK, new THREE.Vector3()); }
   else if (sim.phase === "flight" || sim.phase === "batted" || sim.phase === "tipped") {
     const f = drag(ballVel()).multiplyScalar(BALL_M);
     data.xfrc_applied[ballBody * 6] = f.x; data.xfrc_applied[ballBody * 6 + 1] = f.y; data.xfrc_applied[ballBody * 6 + 2] = f.z;
   }
   mj.mj_step(model, data);
+  if (sim.phase === "return") {                         // the catcher's lob drops into the hopper
+    const b = ballPos();
+    if (b.distanceTo(hopperAt) < 0.4 || b.z < 0.2) { placeBall(PARK, new THREE.Vector3()); sim.phase = "done"; }
+    return;
+  }
   if (sim.phase !== "flight" && sim.phase !== "batted" && sim.phase !== "tipped") return;
   const now = batFrame(), bp = ballPos(), bv = ballVel();
   const u = bp.clone().sub(plate).dot(toP);
@@ -759,8 +919,8 @@ function step() {
   }
 }
 function caught() {                                   // the ball stays in the mitt
-  sim.inMitt = true; mittPos.copy(ballPos()); mittGoal.copy(mittPos);
-  placeBall(mittPos, new THREE.Vector3());
+  sim.inMitt = true; heldAt.copy(ballPos()); catcherCatch(heldAt);
+  placeBall(heldAt, new THREE.Vector3());
 }
 
 // ---------- render loop ----------
@@ -779,12 +939,10 @@ function tick(now) {
   }
   const bp = ballPos();
   ball.position.copy(bp);
-  if (!sim.inMitt) mittPos.lerp(mittGoal, 1 - Math.exp(-dt * 7));
-  mitt.position.copy(mittPos);
-  mitt.rotation.z = ang;
+  catcherUpdate(dt);
   if (sim.phase === "batted") followBall(bp);
   directCamera(dt);
-  if (sim.phase !== "idle" && sim.phase !== "pitch" && bp.z > -1 && trailN < TRAIL) {
+  if (sim.phase !== "idle" && sim.phase !== "pitch" && sim.phase !== "return" && !sim.inMitt && bp.z > -1 && trailN < TRAIL) {
     trailPts.set([bp.x, bp.y, bp.z], trailN * 3); trailN++;
     trailGeo.setDrawRange(0, trailN); trailGeo.attributes.position.needsUpdate = true;
   }
@@ -796,8 +954,8 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 // test hook: step the physics directly (a background tab gets no animation frames)
-window.cage = { get sim() { return sim; }, get parity() { return policy && policy.parity; }, setPolicy: (on) => { policyMode = on; }, pitch, setNoise: (on) => { noiseOn = on; }, setSpeed: (v) => { mph = v; showSpeed(); },
-                advance: (sec) => { for (let k = 0; k < sec / DT; k++) step(); last = performance.now(); tick(last); return $("h-word").textContent; } };
+window.cage = { get sim() { return sim; }, get parity() { return policy && policy.parity; }, setPolicy: (on) => { policyMode = on; }, pitch, setNoise: (on) => { noiseOn = on; }, setCam, setSpeed: (v) => { mph = v; showSpeed(); },
+                advance: (sec) => { for (let k = 0; k < sec / DT; k++) step(); catcherUpdate(sec); last = performance.now(); tick(last); return $("h-word").textContent; } };
 $("loading").hidden = true;
 $("pitch").disabled = false;
 drawTally();
