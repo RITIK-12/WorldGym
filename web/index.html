@@ -542,8 +542,8 @@ const hinges = [];
 }
 catcher.traverse((o) => { o.castShadow = true; });
 // the squat and the poses he moves between (his frame)
-const ANKLE = [V3(0.03, 0.3, 0.1), V3(0.0, -0.3, 0.1)], TOE = [V3(0.2, 0.34, 0.025), V3(0.17, -0.34, 0.025)];
-const HIP = V3(-0.22, 0, 0.5), NECK = V3(-0.01, 0, 0.94);
+const ANKLE = [V3(-0.07, 0.3, 0.11), V3(-0.09, -0.3, 0.11)], TOE = [V3(0.1, 0.35, 0.025), V3(0.08, -0.35, 0.025)];   // up on the balls of his feet
+const HIP = V3(-0.25, 0, 0.47), NECK = V3(-0.02, 0, 0.92);   // heels under the hips, knees out over the toes
 const MITT_HOME = V3(CATCH_X, 0.02, (SZ.bot + SZ.top) / 2), MITT_CHEST = V3(0.16, 0.02, 0.8), MITT_POINT = V3(0.3, 0.14, 0.95);
 const HAND_BACK = V3(-0.33, -0.1, 0.6), HAND_COCK = V3(-0.04, -0.34, 1.2), HAND_FOLLOW = V3(0.36, -0.12, 0.98);
 const ct = { mode: "set", t: 0, pos: MITT_HOME.clone(), vel: V3(0, 0, 0), goal: MITT_HOME.clone(), close: 0, give: 0, frame: V3(0, 0, 0),
