@@ -188,3 +188,35 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def export_policy(policy_path: Path, ref_path: Path, out: Path = OUT) -> dict:
+    """The tracking policy for the browser: observation normaliser, actor MLP weights (ELU), the actuator map, and one
+    reference obs -> action pair so the page can check it computes what PyTorch computes."""
+    import torch
+    from humanoid.track_env import ACTION_SCALE, TrackEnv
+    from humanoid.train import ActorCritic
+    ref = np.load(ref_path)
+    env = TrackEnv(ref["qpos"], float(ref["fps"]), bat=str(ref["bat"]), top_hand=str(ref["top_hand"]))
+    ac = ActorCritic(env.obs_dim, env.nu)
+    ac.load_state_dict(torch.load(policy_path, map_location="cpu"))
+    ac.eval()
+    b64 = lambda a: base64.b64encode(np.ascontiguousarray(a, dtype=np.float32).tobytes()).decode()
+    layers = [m for m in ac.actor if isinstance(m, torch.nn.Linear)]
+    obs = env.reset()
+    with torch.no_grad():
+        act = ac.actor(ac.norm(torch.as_tensor(obs)[None]))[0].numpy()
+    pol = {"obs_dim": env.obs_dim, "act_dim": env.nu, "action_scale": ACTION_SCALE, "ctrl_hz": 50,
+           "mean": b64(ac.norm.mean.numpy()), "var": b64(ac.norm.var.numpy()),
+           "layers": [{"in": l.in_features, "out": l.out_features, "W": b64(l.weight.detach().numpy()),
+                       "b": b64(l.bias.detach().numpy())} for l in layers],
+           "jadr": env.jadr.tolist(), "vadr": env.vadr.tolist(), "lo": env.lo.tolist(), "hi": env.hi.tolist(),
+           "pelvis": "pelvis", "frames": env.T, "test_obs": obs.tolist(), "test_action": act.tolist(),
+           "checkpoint": str(policy_path), "trained_minutes": None}
+    log = policy_path.parent / "log.jsonl"
+    if log.exists():
+        last = json.loads(log.read_text().splitlines()[-1])
+        pol["trained_minutes"] = last["min"]
+        pol["train_stats"] = {k: last[k] for k in ("iter", "reward", "fall_rate", "key_err_cm", "assist")}
+    (out / "policy.json").write_text(json.dumps(pol))
+    return {"bytes": (out / "policy.json").stat().st_size, "frames": env.T, "trained": pol.get("train_stats")}

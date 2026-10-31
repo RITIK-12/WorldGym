@@ -68,6 +68,7 @@
   #pitch:disabled { filter: grayscale(0.7) brightness(0.7); cursor: wait; }
   .icon-btn { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center;
               background: transparent; color: var(--ink-dim); }
+  .icon-btn:disabled { opacity: 0.3; cursor: not-allowed; }
   .icon-btn[aria-pressed="true"] { background: var(--glass-active); color: var(--ball); box-shadow: inset 0 0 0 1px var(--glass-stroke); }
 
   .cams { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); top: 50%; transform: translateY(-50%);
@@ -162,6 +163,9 @@
       <path d="M29.5 11l-2.4-.8M28.4 15l-2.5-.4M28 20h-2.5M28.4 25l-2.5.4M29.5 29l-2.4.8"/>
     </svg>
   </button>
+  <button class="icon-btn" id="brain" aria-pressed="false" title="Trained policy (physics)" aria-label="Trained policy" disabled>
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/><rect x="10" y="10" width="4" height="4"/></svg>
+  </button>
   <button class="icon-btn" id="auto" aria-pressed="false" title="Auto pitch" aria-label="Auto pitch">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg>
   </button>
@@ -198,6 +202,29 @@ const [xml, vis, sw] = await Promise.all([
   get("assets/swing.json").then((r) => r.json()),
 ]);
 const bin = Uint8Array.from(atob(vis.blob), (ch) => ch.charCodeAt(0)).buffer;   // float32 positions, then uint32 indices
+const f32 = (b64) => new Float32Array(Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0)).buffer);
+// the RL tracking policy: observation normaliser + actor MLP (ELU), run in plain JS at 50 Hz
+const policy = await get("assets/policy.json").then((r) => r.ok ? r.json() : null).catch(() => null);
+if (policy) {
+  const mean = f32(policy.mean), vari = f32(policy.var);
+  const layers = policy.layers.map((l) => ({ n: l.in, m: l.out, W: f32(l.W), b: f32(l.b) }));
+  policy.act = (obs) => {
+    let x = new Float32Array(obs.length);
+    for (let i = 0; i < obs.length; i++) x[i] = Math.max(-5, Math.min(5, (obs[i] - mean[i]) / Math.sqrt(vari[i] + 1e-2)));
+    layers.forEach((L, li) => {
+      const y = new Float32Array(L.m), last = li === layers.length - 1;
+      for (let o = 0; o < L.m; o++) {
+        let acc = L.b[o];
+        for (let i = 0, r = o * L.n; i < L.n; i++) acc += L.W[r + i] * x[i];
+        y[o] = last ? acc : acc > 0 ? acc : Math.expm1(acc);
+      }
+      x = y;
+    });
+    return x;
+  };
+  const a = policy.act(policy.test_obs);
+  policy.parity = Math.max(...a.map((v, i) => Math.abs(v - policy.test_action[i])));   // vs PyTorch on the same obs
+}
 let mj;
 try {
   const wasm = await (await get("vendor/mujoco.wasm")).arrayBuffer();
@@ -511,6 +538,38 @@ const showSpeed = () => { $("speed-out").innerHTML = `${mph}<small>mph</small>`;
 $("slower").addEventListener("click", () => { mph = Math.max(25, mph - 5); showSpeed(); });
 $("faster").addEventListener("click", () => { mph = Math.min(65, mph + 5); showSpeed(); });
 
+// ---------- trained policy: observation exactly as in humanoid/track_env.py ----------
+const pol = { on: false, t: 0, k: 0, last: new Float32Array(policy ? policy.act_dim : 0) };
+let policyMode = false;
+function policyObs(t) {
+  const P = policy, T = P.frames, n = NQ_ROBOT, q = data.qpos, v = data.qvel, xm = data.xmat, b = bodyId("pelvis") * 9;
+  const o = new Float32Array(P.obs_dim);
+  let k = 0;
+  o[k++] = -xm[b + 6]; o[k++] = -xm[b + 7]; o[k++] = -xm[b + 8];          // gravity in the pelvis frame
+  o[k++] = v[3] * 0.25; o[k++] = v[4] * 0.25; o[k++] = v[5] * 0.25;        // pelvis angular velocity
+  const tr = Math.min(t, T - 1), tn = Math.min(t + 1, T - 1);
+  for (const j of P.jadr) o[k++] = q[j] - swingQ[tr * n + j];
+  for (const j of P.vadr) o[k++] = v[j] * 0.1;
+  for (let a = 0; a < P.act_dim; a++) o[k++] = pol.last[a];
+  const ph = 2 * Math.PI * tr / T; o[k++] = Math.sin(ph); o[k++] = Math.cos(ph);
+  for (const j of P.jadr) o[k++] = swingQ[tr * n + j];
+  for (const j of P.jadr) o[k++] = swingQ[tn * n + j];
+  return o;
+}
+function policyStep() {                               // one physics step of the policy-driven swing
+  const P = policy, n = NQ_ROBOT, sub = Math.round(1 / (P.ctrl_hz * DT));
+  if (!pol.on) { setSwing(0); pol.on = true; pol.t = 0; pol.k = 0; pol.last.fill(0); }
+  if (pol.k % sub === 0) {
+    const a = P.act(policyObs(pol.t)).map((x) => Math.max(-3, Math.min(3, x)));
+    pol.last.set(a);
+    const tn = Math.min(pol.t + 1, P.frames - 1);
+    for (let i = 0; i < P.act_dim; i++)
+      data.ctrl[i] = Math.max(P.lo[i], Math.min(P.hi[i], swingQ[tn * n + P.jadr[i]] + P.action_scale * a[i]));
+  }
+  pol.k++;
+  if (pol.k % sub === 0) pol.t++;
+}
+
 // ---------- robot pose from the swing ----------
 function setSwing(t) {
   const f = Math.max(0, Math.min(sw.frames - 1.001, t * sw.hz));
@@ -632,6 +691,10 @@ function pitch() {
 }
 $("pitch").addEventListener("click", pitch);
 addEventListener("keydown", (e) => { if (e.code === "Space") { e.preventDefault(); pitch(); } });
+$("brain").disabled = !policy;
+$("brain").addEventListener("click", () => {
+  policyMode = !policyMode; $("brain").setAttribute("aria-pressed", String(policyMode));
+});
 let autoTimer = 0;
 $("auto").addEventListener("click", () => {
   const on = $("auto").getAttribute("aria-pressed") !== "true";
@@ -649,7 +712,8 @@ function finish(word, kind, nums) {
 function step() {
   const prev = batFrame();
   sim.t += DT;
-  setSwing(Math.max(0, sim.t - sim.swingAt));
+  if (policyMode && policy && sim.t >= sim.swingAt) policyStep();
+  else { pol.on = false; setSwing(Math.max(0, sim.t - sim.swingAt)); }
   if (sim.phase === "pitch" && sim.t >= sim.launchAt) { placeBall(release, sim.v); sim.phase = "flight"; wheelSpin = 60; }
   if (sim.inMitt) { placeBall(mittPos, new THREE.Vector3()); }
   else if (sim.phase === "idle" || sim.phase === "pitch") { placeBall(PARK, new THREE.Vector3()); }
@@ -732,7 +796,7 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 // test hook: step the physics directly (a background tab gets no animation frames)
-window.cage = { get sim() { return sim; }, pitch, setNoise: (on) => { noiseOn = on; }, setSpeed: (v) => { mph = v; showSpeed(); },
+window.cage = { get sim() { return sim; }, get parity() { return policy && policy.parity; }, setPolicy: (on) => { policyMode = on; }, pitch, setNoise: (on) => { noiseOn = on; }, setSpeed: (v) => { mph = v; showSpeed(); },
                 advance: (sec) => { for (let k = 0; k < sec / DT; k++) step(); last = performance.now(); tick(last); return $("h-word").textContent; } };
 $("loading").hidden = true;
 $("pitch").disabled = false;
