@@ -122,7 +122,7 @@
   <span><b id="t-hr">0</b><small>HR</small></span>
 </div>
 
-<div class="hud glass" id="hud" aria-live="polite">
+<div class="hud glass show" id="hud" aria-live="polite">
   <span class="word" id="h-word">–</span>
   <div class="nums">
     <div class="n"><b id="h-exit">–</b><small>EV MPH</small></div>
@@ -495,7 +495,7 @@ addEventListener("resize", resize); resize();
 
 // ---------- controls ----------
 const ZONE = [];
-let zoneSel = 4, mph = 45;
+let zoneSel = 1, mph = 45;                            // default: high and middle, where this swing meets the ball
 for (let k = 0; k < 9; k++) {
   const b = document.createElement("button");
   b.setAttribute("aria-label", `${["high", "middle", "low"][Math.floor(k / 3)]} ${["away", "middle", "inside"][k % 3]}`);
@@ -641,7 +641,6 @@ function hud(word, kind, nums) {
   $("h-exit").textContent = nums ? nums[0] : "–"; $("h-la").textContent = nums ? nums[1] : "–"; $("h-dist").textContent = nums ? nums[2] : "–";
   $("h-call").textContent = nums && nums[3] ? nums[3] : "–";
   $("hud").classList.add("show");
-  clearTimeout(hudTimer); hudTimer = setTimeout(() => $("hud").classList.remove("show"), 3800);
 }
 let sim = { t: 0, swingAt: Infinity, launchAt: Infinity, phase: "idle", contact: null, landed: false, gone: false };
 let wheelSpin = 4;
