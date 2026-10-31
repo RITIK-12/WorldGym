@@ -127,6 +127,7 @@
     <div class="n"><b id="h-exit">–</b><small>EV MPH</small></div>
     <div class="n"><b id="h-la">–</b><small>LA</small></div>
     <div class="n"><b id="h-dist">–</b><small>M</small></div>
+    <div class="n"><b id="h-call">–</b><small>CALL</small></div>
   </div>
 </div>
 
@@ -393,21 +394,106 @@ key.position.copy(toThree(plate.clone().addScaledVector(side, 6).addScaledVector
 key.target.position.copy(toThree(plate));
 rim.position.copy(toThree(plate.clone().addScaledVector(toP, -6).addScaledVector(side, -4).setZ(5)));
 
+// ---------- strike zone (rulebook): the hollow below the kneecap up to midway between shoulders and belt,
+// over the 17 in plate, read off the batter's stance; a pitch is a strike if any part of the ball touches it ----------
+const PLATE_HALF = 0.2159;
+const zoneU = 0.22;                                   // the plate's front edge, along the pitch line
+const SZ = (() => {
+  setSwing(0); mj.mj_kinematics(model, data);
+  const z = (n) => data.xpos[bodyId(n) * 3 + 2];
+  const knee = (z("left_knee_link") + z("right_knee_link")) / 2, belt = z("pelvis");
+  const shoulder = (z("left_shoulder_pitch_link") + z("right_shoulder_pitch_link")) / 2;
+  return { bot: knee - 0.03, top: (shoulder + belt) / 2 };
+})();
+const zoneAt = (lat, z) => plate.clone().addScaledVector(toP, zoneU).addScaledVector(side, lat).setZ(z);
+{
+  const pts = [], hw = PLATE_HALF, b = SZ.bot, t = SZ.top;
+  const seg = (a, c) => { pts.push(a.x, a.y, a.z, c.x, c.y, c.z); };
+  seg(zoneAt(-hw, b), zoneAt(hw, b)); seg(zoneAt(hw, b), zoneAt(hw, t)); seg(zoneAt(hw, t), zoneAt(-hw, t)); seg(zoneAt(-hw, t), zoneAt(-hw, b));
+  const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+  const edge = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: "#ffffff", transparent: true, opacity: 0.95, depthTest: false }));
+  edge.renderOrder = 10; world.add(edge);
+  const fillPts = [], third = (t - b) / 3, w3 = 2 * hw / 3;
+  for (let k = 1; k < 3; k++) { const a = zoneAt(-hw, b + k * third), c = zoneAt(hw, b + k * third); fillPts.push(a.x, a.y, a.z, c.x, c.y, c.z);
+                                const e = zoneAt(-hw + k * w3, b), f = zoneAt(-hw + k * w3, t); fillPts.push(e.x, e.y, e.z, f.x, f.y, f.z); }
+  const g2 = new THREE.BufferGeometry(); g2.setAttribute("position", new THREE.Float32BufferAttribute(fillPts, 3));
+  const grid = new THREE.LineSegments(g2, new THREE.LineBasicMaterial({ color: "#ffffff", transparent: true, opacity: 0.3, depthTest: false }));
+  grid.renderOrder = 10; world.add(grid);
+  const pane = new THREE.Mesh(new THREE.PlaneGeometry(2 * hw, t - b), new THREE.MeshBasicMaterial({ color: "#9fd4ff", transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false, depthTest: false }));
+  pane.renderOrder = 9;
+  const c = zoneAt(0, (b + t) / 2); pane.position.set(c.x, c.y, c.z); pane.rotation.set(Math.PI / 2, ang + Math.PI / 2, 0, "ZYX"); world.add(pane);
+}
+const pitchDot = new THREE.Mesh(new THREE.SphereGeometry(BALL_R * 1.3, 16, 12), new THREE.MeshBasicMaterial({ color: "#9ef0a4", depthTest: false }));
+pitchDot.renderOrder = 11;
+pitchDot.visible = false; world.add(pitchDot);
+function callPitch(p) {                               // p: where the ball crossed the front of the plate
+  const rel = p.clone().sub(plate), lat = rel.dot(side);
+  const strike = Math.abs(lat) <= PLATE_HALF + BALL_R && p.z + BALL_R >= SZ.bot && p.z - BALL_R <= SZ.top;
+  pitchDot.position.copy(p); pitchDot.material.color.set(strike ? "#9ef0a4" : "#ff9a85"); pitchDot.visible = true;
+  return strike;
+}
+
+// ---------- the catcher: squats behind the plate, moves the mitt to the pitch, catches whatever gets past ----------
+const catcherAt = plate.clone().addScaledVector(toP, -0.85);
+const catcher = new THREE.Group();
+{
+  const gear = new THREE.MeshStandardMaterial({ color: "#1f2f4f", roughness: 0.6 });
+  const pants = new THREE.MeshStandardMaterial({ color: "#d9d6cf", roughness: 0.8 });
+  const black = new THREE.MeshStandardMaterial({ color: "#111", roughness: 0.5, metalness: 0.3 });
+  const limb = (a, b, r, mat) => { const L = a.distanceTo(b), m = new THREE.Mesh(new THREE.CapsuleGeometry(r, L, 6, 12), mat);
+    m.position.copy(a.clone().add(b).multiplyScalar(0.5)); m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize()); catcher.add(m); };
+  const V = (x, y, z) => new THREE.Vector3(x, y, z);     // local: +x toward the machine, +y left, +z up
+  for (const s of [-1, 1]) {                            // squat: hips low, knees forward and out
+    limb(V(-0.05, s * 0.12, 0.42), V(0.22, s * 0.2, 0.40), 0.065, pants);
+    limb(V(0.22, s * 0.2, 0.40), V(0.08, s * 0.2, 0.06), 0.055, gear);
+    limb(V(0.08, s * 0.2, 0.06), V(0.2, s * 0.2, 0.03), 0.04, black);
+  }
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.36, 0.42), gear); torso.position.set(0.02, 0, 0.66); torso.rotation.y = 0.25; catcher.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 14), black); head.position.set(0.08, 0, 0.98); catcher.add(head);
+  const mask = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.18, 0.2), new THREE.MeshStandardMaterial({ color: "#2a2a2a", metalness: 0.6, roughness: 0.4 }));
+  mask.position.set(0.19, 0, 0.96); catcher.add(mask);
+  limb(V(0.05, -0.19, 0.82), V(0.22, -0.24, 0.55), 0.045, gear);   // throwing hand resting behind the knee
+}
+catcher.position.set(catcherAt.x, catcherAt.y, 0); catcher.rotation.z = ang;
+catcher.traverse((o) => { o.castShadow = true; }); world.add(catcher);
+const mitt = new THREE.Mesh(new THREE.SphereGeometry(0.13, 20, 14), new THREE.MeshStandardMaterial({ color: "#7a4a22", roughness: 0.7 }));
+mitt.scale.set(0.45, 1, 1); mitt.castShadow = true; world.add(mitt);
+const mittHome = catcherAt.clone().addScaledVector(toP, 0.42).addScaledVector(side, 0.1).setZ((SZ.bot + SZ.top) / 2);
+const mittPos = mittHome.clone(), mittGoal = mittHome.clone();
+const catchU = -0.62;                                 // the mitt's plane, behind the plate along the pitch line
+
 // ---------- cameras ----------
 const CAMS = {   // [eye, look-at, vertical field of view]
-  machine: () => [mound.clone().addScaledVector(toP, 3.6).addScaledVector(side, 0.5).setZ(2.6), plate.clone().addScaledVector(toP, 0.4).setZ(0.75), 20],
-  catcher: () => [plate.clone().addScaledVector(toP, -3.2).setZ(1.4), plate.clone().addScaledVector(toP, 8).setZ(1.0), 45],
+  machine: () => [mound.clone().addScaledVector(toP, 7.5).setZ(3.4), plate.clone().addScaledVector(toP, 1.2).setZ(0.7), 22],
+  catcher: () => [plate.clone().addScaledVector(toP, -3.4).setZ(1.5), plate.clone().addScaledVector(toP, 8).setZ(1.0), 45],
   side: () => [plate.clone().addScaledVector(side, -6.5).addScaledVector(toP, 1.4).setZ(1.5), plate.clone().addScaledVector(toP, 0.6).setZ(0.8), 34],
   top: () => [plate.clone().addScaledVector(toP, 16).setZ(42), plate.clone().addScaledVector(toP, 22), 50],
 };
-function setCam(name) {
-  const [eye, look, fov] = CAMS[name]();
-  camera.fov = fov; camera.updateProjectionMatrix();
-  camera.position.copy(toThree(eye)); controls.target.copy(toThree(look)); controls.update();
+// the director: eases the camera toward a shot; on contact it cuts to a high wide shot that tracks the ball, like TV
+const shot = { eye: new THREE.Vector3(), look: new THREE.Vector3(), fov: 22 };
+let camMode = "machine", director = true;
+function aimShot(eye, look, fov) { shot.eye.copy(toThree(eye)); shot.look.copy(toThree(look)); shot.fov = fov; }
+function setCam(name, snap = true) {
+  camMode = name; director = true;
+  const [eye, look, fov] = CAMS[name](); aimShot(eye, look, fov);
+  if (snap) { camera.position.copy(shot.eye); controls.target.copy(shot.look); camera.fov = fov; camera.updateProjectionMatrix(); controls.update(); }
   for (const b of $("cams").children) b.setAttribute("aria-pressed", String(b.dataset.cam === name));
 }
+controls.addEventListener("start", () => { director = false; });   // the viewer took the camera
 $("cams").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setCam(b.dataset.cam); });
 setCam("machine");
+function followBall(bp) {
+  if (!director || camMode !== "machine") return;
+  const wide = plate.clone().addScaledVector(toP, -8).addScaledVector(side, -3.5).setZ(7.5);
+  aimShot(wide, bp.clone().lerp(plate, 0.25), 38);
+}
+function directCamera(dt) {
+  if (!director) return;
+  const k = 1 - Math.exp(-dt * 2.6);
+  camera.position.lerp(shot.eye, k); controls.target.lerp(shot.look, k);
+  camera.fov += (shot.fov - camera.fov) * k; camera.updateProjectionMatrix();
+  camera.lookAt(controls.target);
+}
 function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); }
 addEventListener("resize", resize); resize();
 
@@ -508,29 +594,41 @@ let hudTimer = 0;
 function hud(word, kind, nums) {
   $("h-word").textContent = word; $("h-word").className = "word " + (kind || "");
   $("h-exit").textContent = nums ? nums[0] : "–"; $("h-la").textContent = nums ? nums[1] : "–"; $("h-dist").textContent = nums ? nums[2] : "–";
+  $("h-call").textContent = nums && nums[3] ? nums[3] : "–";
   $("hud").classList.add("show");
   clearTimeout(hudTimer); hudTimer = setTimeout(() => $("hud").classList.remove("show"), 3800);
 }
-let sim = { t: 0, swingAt: Infinity, launchAt: Infinity, phase: "idle", contact: null, landed: false };
+let sim = { t: 0, swingAt: Infinity, launchAt: Infinity, phase: "idle", contact: null, landed: false, inMitt: false };
 let wheelSpin = 4;
-placeBall(new THREE.Vector3(0, 0, -5), new THREE.Vector3());
+const PARK = new THREE.Vector3(0, 0, 50);               // off-field between pitches
+placeBall(PARK, new THREE.Vector3());
 setSwing(0);
 mj.mj_forward(model, data);
 
+const SWING_WINDOW = { up: 0.13, lat: 0.12 };          // how far from its hitting spot the robot will still swing
 function pitch() {
   if (sim.phase === "pitch" || sim.phase === "flight" || sim.phase === "batted") return;
   const speed = mph * MPH;
   const row = Math.floor(zoneSel / 3), col = zoneSel % 3;
-  const target = contact.clone()
-    .add(new THREE.Vector3(0, 0, (1 - row) * 0.09))
-    .addScaledVector(side, (col - 1) * 0.07 * (sw.top_hand === "left" ? -1 : 1))
+  const hand = sw.top_hand === "left" ? -1 : 1;
+  const zoneH = SZ.top - SZ.bot;
+  // top row: up where this swing meets the ball (a high pitch); middle and low rows: the upper and lower strike zone
+  const z = [contact.z, SZ.top - zoneH * 0.3, SZ.bot + zoneH * 0.25][row];
+  const lat = row === 0 ? (col - 1) * 0.06 * hand : [-0.12, 0, 0.32][col] * hand;
+  const target = plate.clone().addScaledVector(toP, contact.clone().sub(plate).dot(toP)).addScaledVector(side, lat).setZ(z)
     .add(new THREE.Vector3(noise(0.015), noise(0.015), noise(0.015)));     // the machine scatters about 1.5 cm
   const { v, T } = aim(release, target, speed);
+  const reach = Math.abs(target.z - contact.z) <= SWING_WINDOW.up && Math.abs(target.clone().sub(contact).dot(side)) <= SWING_WINDOW.lat;
   const lead = Math.max(0.35, T_CONTACT - T + 0.2);
-  sim = { t: 0, launchAt: lead, swingAt: lead + T - T_CONTACT + noise(TIMING_SD), phase: "pitch", contact: null, landed: false, v };
+  sim = { t: 0, launchAt: lead, swingAt: reach ? lead + T - T_CONTACT + noise(TIMING_SD) : Infinity, phase: "pitch",
+          contact: null, landed: false, v, crossed: null, strike: false, swung: reach };
   tally.p++; drawTally();
   $("pitch").disabled = true;
+  pitchDot.visible = false;
   trailN = 0; trailGeo.setDrawRange(0, 0);
+  // the catcher sets up where the ball will arrive
+  mittGoal.copy(target).addScaledVector(toP, catchU - contact.clone().sub(plate).dot(toP));
+  if (camMode === "machine") setCam("machine", false);
 }
 $("pitch").addEventListener("click", pitch);
 addEventListener("keydown", (e) => { if (e.code === "Space") { e.preventDefault(); pitch(); } });
@@ -542,6 +640,7 @@ $("auto").addEventListener("click", () => {
 });
 function finish(word, kind, nums) {
   hud(word, kind, nums); drawTally(); sim.phase = "done";
+  setTimeout(() => { if (sim.phase === "done") { if (camMode === "machine") setCam("machine", false); if (!sim.inMitt) mittGoal.copy(mittHome); } }, 2200);
   setTimeout(() => { $("pitch").disabled = false; }, 500);
   clearTimeout(autoTimer);
   if ($("auto").getAttribute("aria-pressed") === "true") autoTimer = setTimeout(pitch, 2600);
@@ -552,26 +651,36 @@ function step() {
   sim.t += DT;
   setSwing(Math.max(0, sim.t - sim.swingAt));
   if (sim.phase === "pitch" && sim.t >= sim.launchAt) { placeBall(release, sim.v); sim.phase = "flight"; wheelSpin = 60; }
-  if (sim.phase === "flight" || sim.phase === "batted") {
+  if (sim.inMitt) { placeBall(mittPos, new THREE.Vector3()); }
+  else if (sim.phase === "idle" || sim.phase === "pitch") { placeBall(PARK, new THREE.Vector3()); }
+  else if (sim.phase === "flight" || sim.phase === "batted" || sim.phase === "tipped") {
     const f = drag(ballVel()).multiplyScalar(BALL_M);
     data.xfrc_applied[ballBody * 6] = f.x; data.xfrc_applied[ballBody * 6 + 1] = f.y; data.xfrc_applied[ballBody * 6 + 2] = f.z;
   }
   mj.mj_step(model, data);
-  if (sim.phase !== "flight" && sim.phase !== "batted") return;
+  if (sim.phase !== "flight" && sim.phase !== "batted" && sim.phase !== "tipped") return;
   const now = batFrame(), bp = ballPos(), bv = ballVel();
+  const u = bp.clone().sub(plate).dot(toP);
+  if (!sim.crossed && u <= zoneU) { sim.crossed = bp.clone(); sim.strike = callPitch(bp); }
+  const call = () => sim.strike ? "S" : "B";
   if (sim.phase === "flight") {
-    const out = collide(prev, now, bp, bv);
-    if (out) {
+    const out = sim.swung ? collide(prev, now, bp, bv) : null;
+    if (out && out.dot(toP) > 0) {                      // in play
       placeBall(bp, out);
       const s = out.length(), launch = Math.atan2(out.z, Math.hypot(out.x, out.y)) * 180 / Math.PI;
       sim.contact = { s, launch }; sim.phase = "batted"; trailN = 0;
-    } else if (bp.clone().sub(plate).dot(toP) < -1.0) {
-      finish("Swing and miss", "bad");
+    } else if (out) {                                   // foul tip back toward the catcher
+      placeBall(bp, out); sim.phase = "tipped";
+    } else if (u <= catchU) {
+      caught(); finish(sim.swung ? "Swinging strike" : sim.strike ? "Strike" : "Ball", sim.swung || sim.strike ? "bad" : "good",
+                       ["–", "–", "–", sim.swung ? "S" : call()]);
     }
+  } else if (sim.phase === "tipped") {
+    if (u <= catchU || bp.z < 0.1) { caught(); finish("Foul tip, caught", "bad", ["–", "–", "–", "S"]); }
   } else {
     const rel = bp.clone().sub(plate), d = Math.hypot(rel.x, rel.y);
     const off = Math.abs(Math.atan2(toP.x * rel.y - toP.y * rel.x, rel.x * toP.x + rel.y * toP.y)) * 180 / Math.PI;
-    const nums = () => [(sim.contact.s / MPH).toFixed(0), `${sim.contact.launch.toFixed(0)}°`, d.toFixed(1)];
+    const nums = () => [(sim.contact.s / MPH).toFixed(0), `${sim.contact.launch.toFixed(0)}°`, d.toFixed(1), call()];
     if (!sim.landed && d >= FENCE_M && bp.z > FENCE_H && off <= 45) {
       sim.landed = true; tally.hr++; tally.h++; tally.best = Math.max(tally.best, d); finish("Home run", "good", nums());
     } else if (!sim.landed && bp.z <= BALL_R + 0.005 && bv.z <= 0) {
@@ -584,6 +693,10 @@ function step() {
       }
     }
   }
+}
+function caught() {                                   // the ball stays in the mitt
+  sim.inMitt = true; mittPos.copy(ballPos()); mittGoal.copy(mittPos);
+  placeBall(mittPos, new THREE.Vector3());
 }
 
 // ---------- render loop ----------
@@ -602,11 +715,16 @@ function tick(now) {
   }
   const bp = ballPos();
   ball.position.copy(bp);
+  if (!sim.inMitt) mittPos.lerp(mittGoal, 1 - Math.exp(-dt * 7));
+  mitt.position.copy(mittPos);
+  mitt.rotation.z = ang;
+  if (sim.phase === "batted") followBall(bp);
+  directCamera(dt);
   if (sim.phase !== "idle" && sim.phase !== "pitch" && bp.z > -1 && trailN < TRAIL) {
     trailPts.set([bp.x, bp.y, bp.z], trailN * 3); trailN++;
     trailGeo.setDrawRange(0, trailN); trailGeo.attributes.position.needsUpdate = true;
   }
-  controls.update();
+  if (!director) controls.update();
   renderer.render(scene, camera);
 }
 function frame(now) {
