@@ -495,7 +495,7 @@ addEventListener("resize", resize); resize();
 
 // ---------- controls ----------
 const ZONE = [];
-let zoneSel = 1, mph = 45;                            // default: high and middle, where this swing meets the ball
+let zoneSel = 4, mph = 45;
 for (let k = 0; k < 9; k++) {
   const b = document.createElement("button");
   b.setAttribute("aria-label", `${["high", "middle", "low"][Math.floor(k / 3)]} ${["away", "middle", "inside"][k % 3]}`);
@@ -504,7 +504,7 @@ for (let k = 0; k < 9; k++) {
   $("zone").appendChild(b); ZONE.push(b);
 }
 const showSpeed = () => { $("speed-out").innerHTML = `${mph}<small>mph</small>`; };
-$("slower").addEventListener("click", () => { mph = Math.max(25, mph - 5); showSpeed(); });
+$("slower").addEventListener("click", () => { mph = Math.max(30, mph - 5); showSpeed(); });
 $("faster").addEventListener("click", () => { mph = Math.min(65, mph + 5); showSpeed(); });
 
 // ---------- trained policy: observation exactly as in humanoid/track_env.py ----------
@@ -635,7 +635,6 @@ let TIMING_SD = 0.007, noiseOn = true;
 const noise = (sd) => noiseOn ? sd * Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random()) : 0;
 const tally = { h: 0, hr: 0 }, count = { b: 0, s: 0, outs: 0 };
 const drawTally = () => { $("t-count").textContent = `${count.b}-${count.s}`; $("t-outs").textContent = count.outs; $("t-h").textContent = tally.h; $("t-hr").textContent = tally.hr; };
-let hudTimer = 0;
 function hud(word, kind, nums) {
   $("h-word").textContent = word; $("h-word").className = "word " + (kind || "");
   $("h-exit").textContent = nums ? nums[0] : "–"; $("h-la").textContent = nums ? nums[1] : "–"; $("h-dist").textContent = nums ? nums[2] : "–";
@@ -670,13 +669,13 @@ function pitch() {
   const row = Math.floor(zoneSel / 3), col = zoneSel % 3;
   const hand = sw.top_hand === "left" ? -1 : 1;
   const zoneH = SZ.top - SZ.bot;
-  // top row: up where this swing meets the ball (a high pitch); middle and low rows: the upper and lower strike zone
+  // middle row: where this swing meets the ball; top row a touch above it; low row: the strike zone, which it takes
   const usePolicy = policyMode && policy, hit = usePolicy ? polContact : contact, tHit = usePolicy ? polContactT : T_CONTACT;
-  const z = [hit.z, SZ.top - zoneH * 0.3, SZ.bot + zoneH * 0.25][row];
+  const z = [hit.z + 0.04, hit.z, (SZ.top + SZ.bot) / 2][row];
   // columns as seen from behind the machine: away (a ball), middle, inside (toward the batter, still a strike)
-  const lat = row === 0 ? (col - 1) * 0.06 * hand : [-0.32, 0, 0.12][col] * hand;
-  // the top row is aimed where the bat meets the ball, the zone rows at the zone itself (the plate's midpoint)
-  const target = plate.clone().addScaledVector(toP, row === 0 ? hit.clone().sub(plate).dot(toP) : zoneU).addScaledVector(side, lat + (row === 0 ? hit.clone().sub(plate).dot(side) : 0)).setZ(z)
+  const lat = row < 2 ? (col - 1) * 0.06 * hand : [-0.32, 0, 0.12][col] * hand;
+  // the swing rows are aimed where the bat meets the ball, the low row at the zone itself (the plate's midpoint)
+  const target = plate.clone().addScaledVector(toP, row < 2 ? hit.clone().sub(plate).dot(toP) : zoneU).addScaledVector(side, lat + (row < 2 ? hit.clone().sub(plate).dot(side) : 0)).setZ(z)
     .add(new THREE.Vector3(noise(0.015), noise(0.015), noise(0.015)));     // the machine scatters about 1.5 cm
   const { v, T } = aim(release, target, speed);
   const reach = Math.abs(target.z - hit.z) <= SWING_WINDOW.up && Math.abs(target.clone().sub(hit).dot(side)) <= SWING_WINDOW.lat;
