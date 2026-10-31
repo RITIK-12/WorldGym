@@ -190,6 +190,41 @@ if __name__ == "__main__":
     main()
 
 
+def _policy_contact(ac, env, to_pitcher: list[float], out: Path = OUT) -> dict:
+    """Roll the policy out on the page's own physics model (4 ms steps, as in training) and find where its bat meets
+    the ball: the sweet spot moving fastest toward the pitcher. The page aims the machine there in policy mode."""
+    import torch
+    w = mujoco.MjModel.from_xml_string((out / "cage.xml").read_text())
+    w.opt.timestep = 1.0 / (CTRL_HZ * 5)
+    d = mujoco.MjData(w)
+    nq, nv = env.m.nq, env.m.nv
+    d.qpos[:nq] = env.q_ref[0]
+    d.qpos[nq:nq + 3] = [0, 0, 50]
+    d.qpos[nq + 3] = 1
+    mujoco.mj_forward(w, d)
+    pel, sweet = w.body("pelvis").id, w.site("bat_sweet_spot").id
+    last, P = np.zeros(env.nu, dtype=np.float32), []
+    for t in range(env.T - 1):
+        R = d.xmat[pel].reshape(3, 3)
+        obs = np.concatenate([R.T @ [0, 0, -1.0], d.qvel[3:6] * 0.25, d.qpos[env.jadr] - env.q_ref[t, env.jadr],
+                              d.qvel[env.vadr] * 0.1, last, [np.sin(2 * np.pi * t / env.T), np.cos(2 * np.pi * t / env.T)],
+                              env.q_ref[t, env.jadr], env.q_ref[t + 1, env.jadr]]).astype(np.float32)
+        with torch.no_grad():
+            last = np.clip(ac.actor(ac.norm(torch.as_tensor(obs)[None]))[0].numpy(), -3, 3)
+        d.ctrl[:env.nu] = np.clip(env.q_ref[t + 1, env.jadr] + 0.25 * last, env.lo, env.hi)
+        for _ in range(5):
+            d.qpos[nq:nq + 3] = [0, 0, 50]
+            d.qvel[nv:] = 0
+            mujoco.mj_step(w, d)
+            mujoco.mj_kinematics(w, d)
+            P.append(d.site_xpos[sweet].copy())
+    P = np.array(P)
+    V = np.gradient(P, w.opt.timestep, axis=0)
+    k = int((V @ np.array(to_pitcher)).argmax())
+    return {"contact": np.round(P[k], 4).tolist(), "contact_t": round((k + 1) * w.opt.timestep, 4),
+            "contact_speed_mps": round(float(np.linalg.norm(V[k])), 2)}
+
+
 def export_policy(policy_path: Path, ref_path: Path, out: Path = OUT) -> dict:
     """The tracking policy for the browser: observation normaliser, actor MLP weights (ELU), the actuator map, and one
     reference obs -> action pair so the page can check it computes what PyTorch computes."""
@@ -213,6 +248,7 @@ def export_policy(policy_path: Path, ref_path: Path, out: Path = OUT) -> dict:
            "jadr": env.jadr.tolist(), "vadr": env.vadr.tolist(), "lo": env.lo.tolist(), "hi": env.hi.tolist(),
            "pelvis": "pelvis", "frames": env.T, "test_obs": obs.tolist(), "test_action": act.tolist(),
            "checkpoint": str(policy_path), "trained_minutes": None}
+    pol.update(_policy_contact(ac, env, json.loads((out / "swing.json").read_text())["to_pitcher"]))
     log = policy_path.parent / "log.jsonl"
     if log.exists():
         last = json.loads(log.read_text().splitlines()[-1])

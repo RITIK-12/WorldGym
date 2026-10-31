@@ -695,9 +695,13 @@ $("slower").addEventListener("click", () => { mph = Math.max(25, mph - 5); showS
 $("faster").addEventListener("click", () => { mph = Math.min(65, mph + 5); showSpeed(); });
 
 // ---------- trained policy: observation exactly as in humanoid/track_env.py ----------
-const pol = { on: false, t: 0, k: 0, last: new Float32Array(policy ? policy.act_dim : 0) };
+const pol = { on: false, t: 0, k: 0, last: new Float32Array(policy ? policy.act_dim : 0), hold: null };
+// training episodes end 1 s after the follow-through; the policy balances for half of that, then the robot is held still
+const POLICY_END_PAD = 25;
+let polContact = contact, polContactT = T_CONTACT;    // where and when the policy's own bat meets the ball (measured below)
 let policyMode = false;
 function policyObs(t) {
+  mj.mj_kinematics(model, data);                        // the pelvis orientation now, whatever the frame timing
   const P = policy, T = P.frames, n = NQ_ROBOT, q = data.qpos, v = data.qvel, xm = data.xmat, b = bodyId("pelvis") * 9;
   const o = new Float32Array(P.obs_dim);
   let k = 0;
@@ -714,7 +718,14 @@ function policyObs(t) {
 }
 function policyStep() {                               // one physics step of the policy-driven swing
   const P = policy, n = NQ_ROBOT, sub = Math.round(1 / (P.ctrl_hz * DT));
-  if (!pol.on) { setSwing(0); pol.on = true; pol.t = 0; pol.k = 0; pol.last.fill(0); }
+  if (!pol.on) {                                         // every swing starts from the same state, solver warm start included
+    setSwing(0); data.qacc_warmstart.fill(0); pol.on = true; pol.t = 0; pol.k = 0; pol.last.fill(0); pol.hold = null;
+  }
+  if (pol.t >= P.frames - 1 - POLICY_END_PAD) {          // its episode is over: hold the robot where the policy left it
+    if (!pol.hold) pol.hold = Float64Array.from(data.qpos.subarray(0, n));
+    data.qpos.set(pol.hold); for (let j = 0; j < n - 1; j++) data.qvel[j] = 0;
+    pol.k++; return;
+  }
   if (pol.k % sub === 0) {
     const a = P.act(policyObs(pol.t)).map((x) => Math.max(-3, Math.min(3, x)));
     pol.last.set(a);
@@ -779,22 +790,28 @@ function batFrame() {
            q: new THREE.Quaternion(data.xquat[batBody * 4 + 1], data.xquat[batBody * 4 + 2], data.xquat[batBody * 4 + 3], data.xquat[batBody * 4]) };
 }
 const local = (f, z) => new THREE.Vector3(0, 0, z).applyQuaternion(f.q).add(f.p);
-function collide(prev, now, bp, bv) {
-  for (const [z0, z1, r] of capsules) {
-    const a = local(now, z0), ab = local(now, z1).sub(a);
-    const s = Math.max(0, Math.min(1, bp.clone().sub(a).dot(ab) / ab.lengthSq()));
-    const c = a.clone().addScaledVector(ab, s), n = bp.clone().sub(c), dist = n.length();
-    if (dist > r + BALL_R) continue;
-    n.divideScalar(dist || 1);
-    const z = z0 + s * (z1 - z0);
-    const vRel = bv.clone().sub(c.clone().sub(local(prev, z)).divideScalar(DT));
-    const vn = vRel.dot(n);
-    if (vn >= 0) continue;
-    const arm = z - bat.zc, invMeff = 1 / bat.m + arm * arm / bat.I;
-    const J = -(1 + COR) * vn / (1 / BALL_M + invMeff);
-    const out = bv.clone().addScaledVector(n, J / BALL_M).addScaledVector(vRel.clone().addScaledVector(n, -vn), -0.1);
-    bp.copy(c).addScaledVector(n, r + BALL_R + 0.001);
-    return out;
+function collide(prev, now, bp, bv, h = DT) {
+  // swept in 0.5 ms slices (bat between its two frames, ball back along its velocity) so contact is found as it begins
+  const N = Math.max(1, Math.round(h / 0.0005));
+  for (let i = 1; i <= N; i++) {
+    const f = { p: prev.p.clone().lerp(now.p, i / N), q: prev.q.clone().slerp(now.q, i / N) };
+    const b = bp.clone().addScaledVector(bv, -h * (1 - i / N));
+    for (const [z0, z1, r] of capsules) {
+      const a = local(f, z0), ab = local(f, z1).sub(a);
+      const s = Math.max(0, Math.min(1, b.clone().sub(a).dot(ab) / ab.lengthSq()));
+      const c = a.clone().addScaledVector(ab, s), n = b.clone().sub(c), dist = n.length();
+      if (dist > r + BALL_R) continue;
+      n.divideScalar(dist || 1);
+      const z = z0 + s * (z1 - z0);
+      const vRel = bv.clone().sub(local(now, z).sub(local(prev, z)).divideScalar(h));
+      const vn = vRel.dot(n);
+      if (vn >= 0) continue;
+      const arm = z - bat.zc, invMeff = 1 / bat.m + arm * arm / bat.I;
+      const J = -(1 + COR) * vn / (1 / BALL_M + invMeff);
+      const out = bv.clone().addScaledVector(n, J / BALL_M).addScaledVector(vRel.clone().addScaledVector(n, -vn), -0.1);
+      bp.copy(c).addScaledVector(n, r + BALL_R + 0.001);
+      return out;
+    }
   }
   return null;
 }
@@ -819,6 +836,20 @@ const PARK = new THREE.Vector3(0, 0, 50);               // off-field between pit
 placeBall(PARK, new THREE.Vector3());
 setSwing(0);
 mj.mj_forward(model, data);
+if (policy) {   // a silent dry run on this page's physics: the sweet spot moving fastest toward the machine is the policy's contact
+  const sid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_SITE.value, "bat_sweet_spot"), path = [];
+  pol.on = false;
+  for (let k = 0; k < Math.round(1.6 / DT); k++) {
+    policyStep(); placeBall(PARK, new THREE.Vector3());
+    if (pol.k % 2 === 0) continue;
+    model.opt.timestep = 2 * DT; mj.mj_step(model, data); mj.mj_kinematics(model, data);
+    path.push({ t: (k + 1) * DT, p: new THREE.Vector3(data.site_xpos[sid * 3], data.site_xpos[sid * 3 + 1], data.site_xpos[sid * 3 + 2]) });
+  }
+  let best = 1;
+  for (let i = 1; i < path.length - 1; i++) if (path[i + 1].p.clone().sub(path[i - 1].p).dot(toP) > path[best + 1].p.clone().sub(path[best - 1].p).dot(toP)) best = i;
+  polContact = path[best].p.clone().add(new THREE.Vector3(0, 0, 0.02)); polContactT = path[best].t;   // a touch high: meet the ball's centre, not its top
+  pol.on = false; model.opt.timestep = DT; setSwing(0); placeBall(PARK, new THREE.Vector3()); mj.mj_forward(model, data);
+}
 
 const SWING_WINDOW = { up: 0.13, lat: 0.12 };          // how far from its hitting spot the robot will still swing
 function pitch() {
@@ -828,14 +859,15 @@ function pitch() {
   const hand = sw.top_hand === "left" ? -1 : 1;
   const zoneH = SZ.top - SZ.bot;
   // top row: up where this swing meets the ball (a high pitch); middle and low rows: the upper and lower strike zone
-  const z = [contact.z, SZ.top - zoneH * 0.3, SZ.bot + zoneH * 0.25][row];
+  const usePolicy = policyMode && policy, hit = usePolicy ? polContact : contact, tHit = usePolicy ? polContactT : T_CONTACT;
+  const z = [hit.z, SZ.top - zoneH * 0.3, SZ.bot + zoneH * 0.25][row];
   const lat = row === 0 ? (col - 1) * 0.06 * hand : [-0.12, 0, 0.32][col] * hand;
-  const target = plate.clone().addScaledVector(toP, contact.clone().sub(plate).dot(toP)).addScaledVector(side, lat).setZ(z)
+  const target = plate.clone().addScaledVector(toP, hit.clone().sub(plate).dot(toP)).addScaledVector(side, lat + (row === 0 ? hit.clone().sub(plate).dot(side) : 0)).setZ(z)
     .add(new THREE.Vector3(noise(0.015), noise(0.015), noise(0.015)));     // the machine scatters about 1.5 cm
   const { v, T } = aim(release, target, speed);
-  const reach = Math.abs(target.z - contact.z) <= SWING_WINDOW.up && Math.abs(target.clone().sub(contact).dot(side)) <= SWING_WINDOW.lat;
-  const lead = Math.max(0.35, T_CONTACT - T + 0.2);
-  sim = { t: 0, launchAt: lead, swingAt: reach ? lead + T - T_CONTACT + noise(TIMING_SD) : Infinity, phase: "pitch",
+  const reach = Math.abs(target.z - hit.z) <= SWING_WINDOW.up && Math.abs(target.clone().sub(hit).dot(side)) <= SWING_WINDOW.lat;
+  const lead = Math.max(0.35, tHit - T + 0.2);
+  sim = { t: 0, launchAt: lead, swingAt: reach ? lead + T - tHit + noise(TIMING_SD) : Infinity, phase: "pitch",
           contact: null, landed: false, v, crossed: null, strike: false, swung: reach };
   tally.p++; drawTally();
   $("pitch").disabled = true;
@@ -876,6 +908,10 @@ function step() {
     const f = drag(ballVel()).multiplyScalar(BALL_M);
     data.xfrc_applied[ballBody * 6] = f.x; data.xfrc_applied[ballBody * 6 + 1] = f.y; data.xfrc_applied[ballBody * 6 + 2] = f.z;
   }
+  // the policy was trained on 4 ms physics steps: while it drives the robot, every other call takes one step twice as long
+  const h = pol.on ? 2 * DT : DT;
+  if (pol.on && pol.k % 2 === 0) return;
+  model.opt.timestep = h;
   mj.mj_step(model, data);
   if (sim.phase === "return") {                         // the catcher's lob drops into the hopper
     const b = ballPos();
@@ -888,7 +924,7 @@ function step() {
   if (!sim.crossed && u <= zoneU) { sim.crossed = bp.clone(); sim.strike = callPitch(bp); }
   const call = () => sim.strike ? "S" : "B";
   if (sim.phase === "flight") {
-    const out = sim.swung ? collide(prev, now, bp, bv) : null;
+    const out = sim.swung ? collide(prev, now, bp, bv, h) : null;
     if (out && out.dot(toP) > 0) {                      // in play
       placeBall(bp, out);
       const s = out.length(), launch = Math.atan2(out.z, Math.hypot(out.x, out.y)) * 180 / Math.PI;
@@ -942,7 +978,7 @@ function tick(now) {
   catcherUpdate(dt);
   if (sim.phase === "batted") followBall(bp);
   directCamera(dt);
-  if (sim.phase !== "idle" && sim.phase !== "pitch" && sim.phase !== "return" && !sim.inMitt && bp.z > -1 && trailN < TRAIL) {
+  if (sim.phase !== "idle" && sim.phase !== "pitch" && sim.phase !== "return" && !sim.inMitt && bp.z > -1 && bp.z < PARK.z - 1 && trailN < TRAIL) {
     trailPts.set([bp.x, bp.y, bp.z], trailN * 3); trailN++;
     trailGeo.setDrawRange(0, trailN); trailGeo.attributes.position.needsUpdate = true;
   }
@@ -954,7 +990,7 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 // test hook: step the physics directly (a background tab gets no animation frames)
-window.cage = { get sim() { return sim; }, get parity() { return policy && policy.parity; }, setPolicy: (on) => { policyMode = on; }, pitch, setNoise: (on) => { noiseOn = on; }, setCam, setSpeed: (v) => { mph = v; showSpeed(); },
+window.cage = { get sim() { return sim; }, get parity() { return policy && policy.parity; }, setPolicy: (on) => { policyMode = on; }, pitch, setNoise: (on) => { noiseOn = on; }, setCam, pelvisZ: () => data.qpos[2], polContact: () => [polContact.toArray(), polContactT], setSpeed: (v) => { mph = v; showSpeed(); },
                 advance: (sec) => { for (let k = 0; k < sec / DT; k++) step(); catcherUpdate(sec); last = performance.now(); tick(last); return $("h-word").textContent; } };
 $("loading").hidden = true;
 $("pitch").disabled = false;
