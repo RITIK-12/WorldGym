@@ -20,6 +20,7 @@ runs/
 replay_cache/
 *.mp4
 !demo/*.mp4
+!web/info/media/*.mp4
 
 # OS / editor
 .DS_Store
