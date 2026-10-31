@@ -50,18 +50,15 @@
 
   /* hero */
   .hero { text-align: center; padding: 28px 0 8px; }
-  .kicker { display: inline-flex; gap: 8px; align-items: center; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-dim);
-            padding: 7px 14px; border-radius: 999px; }
-  .kicker i { width: 7px; height: 7px; border-radius: 50%; background: var(--ball); box-shadow: 0 0 12px var(--ball); }
-  h1 { font-size: clamp(48px, 10vw, 104px); line-height: 0.95; letter-spacing: -0.045em; margin: 22px 0 10px; font-weight: 800;
+  h1 { font-size: clamp(48px, 10vw, 104px); line-height: 0.95; letter-spacing: -0.045em; margin: 8px 0 10px; font-weight: 800;
        background: linear-gradient(180deg, #fff 30%, rgba(255, 255, 255, 0.55)); -webkit-background-clip: text; background-clip: text; color: transparent; }
   .sub { font-size: clamp(19px, 2.6vw, 26px); font-weight: 600; letter-spacing: -0.01em; margin: 0; }
-  .purpose { max-width: 620px; margin: 22px auto 0; padding: 20px 26px; font-size: 16px; color: var(--ink-dim); text-wrap: balance; }
-  .purpose b { color: var(--ink); font-weight: 600; }
-  .route { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 8px; margin: 26px auto 0; max-width: 820px; }
-  .route a { display: inline-flex; align-items: center; gap: 8px; padding: 9px 14px; border-radius: 999px; color: var(--ink); text-decoration: none; font-size: 13px; font-weight: 600; }
+  .route { display: flex; flex-wrap: nowrap; justify-content: center; align-items: center; gap: 6px; margin: 30px auto 0; padding: 4px 2px 10px;
+           overflow-x: auto; scrollbar-width: none; }
+  .route::-webkit-scrollbar { display: none; }
+  .route a { flex: none; display: inline-flex; align-items: center; gap: 7px; padding: 9px 13px; border-radius: 999px; color: var(--ink); text-decoration: none; font-size: 13px; font-weight: 600; white-space: nowrap; }
   .route a span { font-family: var(--mono); font-size: 11px; color: var(--ball); }
-  .route .arrow { color: var(--ink-faint); font-size: 13px; }
+  .route .arrow { flex: none; color: var(--ink-faint); font-size: 13px; }
 
   /* storyboard: a flow rail with a node per scene */
   .board { position: relative; margin-top: 56px; }
@@ -71,13 +68,9 @@
   .node { position: relative; z-index: 1; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center;
           font: 700 15px var(--mono); color: var(--night); background: var(--ball); box-shadow: 0 0 0 6px rgba(7, 13, 10, 0.9), 0 0 24px rgba(255, 180, 58, 0.45); }
   .card { padding: 22px; border-radius: 28px; min-width: 0; }
-  .head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; margin-bottom: 14px; }
+  .head { margin-bottom: 8px; }
   h2 { font-size: clamp(22px, 3vw, 30px); letter-spacing: -0.02em; line-height: 1.1; margin: 0; }
   .cap { color: var(--ink-dim); font-size: 15px; margin: 0 0 16px; max-width: 70ch; }
-  .tags { display: flex; flex-wrap: wrap; gap: 6px; }
-  .tag { font: 600 11px var(--mono); letter-spacing: 0.02em; padding: 5px 10px; border-radius: 999px; color: var(--ink-dim);
-         background: rgba(255, 255, 255, 0.06); box-shadow: inset 0 0 0 1px var(--glass-stroke); }
-  .tag.claude { color: #ffd9a8; background: rgba(217, 119, 87, 0.18); }
   figure { margin: 0; }
   .media { display: grid; gap: 12px; }
   .media.two { grid-template-columns: 1.78fr 1fr; }      /* a 16:9 clip and a square clip at equal height */
@@ -89,20 +82,20 @@
 
   /* flow diagrams */
   .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; }
-  .flow .step { flex: 1 1 140px; padding: 14px 14px 12px; border-radius: 18px; background: rgba(255, 255, 255, 0.05); box-shadow: inset 0 0 0 1px var(--glass-stroke); }
+  .flow .step { flex: 1 1 0; min-width: 0; padding: 14px 14px 12px; border-radius: 18px; }
   .flow .step b { display: block; font-size: 14px; margin-bottom: 3px; }
   .flow .step small { color: var(--ink-dim); font-size: 12px; line-height: 1.35; display: block; }
-  .flow .step.hot { background: rgba(217, 119, 87, 0.16); box-shadow: inset 0 0 0 1px rgba(255, 190, 150, 0.28); }
-  .flow .step.gt { background: rgba(90, 220, 255, 0.08); box-shadow: inset 0 0 0 1px rgba(90, 220, 255, 0.22); }
+  .flow .step.hot b { color: #ffd9a8; }
+  .flow .step.gt b { color: var(--sky); }
   .flow .to { align-self: center; color: var(--ball); font-size: 18px; }
   .loopback { margin-top: 10px; font: 600 11px var(--mono); color: var(--ink-faint); letter-spacing: 0.04em; text-transform: uppercase; text-align: center; }
   .loopback em { color: #ffd9a8; font-style: normal; }
 
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
-  .stat { padding: 14px; border-radius: 18px; background: rgba(255, 255, 255, 0.05); box-shadow: inset 0 0 0 1px var(--glass-stroke); }
+  .stat { padding: 14px; border-radius: 18px; }
   .stat b { display: block; font-size: 24px; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
   .stat span { font-size: 12px; color: var(--ink-dim); }
-  .chart { padding: 16px 16px 8px; border-radius: 18px; background: rgba(255, 255, 255, 0.04); box-shadow: inset 0 0 0 1px var(--glass-stroke); }
+  .chart { padding: 16px 16px 8px; border-radius: 18px; }
   .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
   .legend { display: flex; gap: 16px; font: 600 11px var(--mono); color: var(--ink-dim); margin: 0 0 8px; }
   .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
@@ -134,11 +127,8 @@
 </nav>
 <main>
   <header class="hero">
-    <span class="kicker glass"><i></i>Founders Inc night hack</span>
     <h1>WorldGym</h1>
     <p class="sub">Turn any video into simulation.</p>
-    <p class="purpose glass"><b>Real to sim to real, for humanoids.</b> One clip of a person swinging a bat becomes a physically checked motion,
-      a training environment and a policy a Unitree G1 runs on its own. Human video is the dataset: no mocap, no teleoperation.</p>
     <div class="route" aria-label="Pipeline">
       <a class="glass" href="#video"><span>01</span>Video</a><span class="arrow">→</span>
       <a class="glass" href="#perceive"><span>02</span>SAM 3D</a><span class="arrow">→</span>
@@ -154,7 +144,7 @@
     <article class="scene" id="video">
       <div class="node">01</div>
       <div class="card glass">
-        <div class="head"><h2>One baseball video</h2><div class="tags"><span class="tag">Penn Action · clip 0278</span><span class="tag">29 frames · 1 s</span></div></div>
+        <div class="head"><h2>One baseball video</h2></div>
         <p class="cap">A youth batter, filmed from the side. That's the only input.</p>
         <video src="media/01_source.mp4" autoplay muted loop playsinline preload="metadata" aria-label="The source clip: a batter swings"></video>
       </div>
@@ -163,7 +153,7 @@
     <article class="scene" id="perceive">
       <div class="node">02</div>
       <div class="card glass">
-        <div class="head"><h2>Find the striker, lift him to 3D</h2><div class="tags"><span class="tag">SAM 3</span><span class="tag">SAM 3D Body</span><span class="tag">laptop CPU</span></div></div>
+        <div class="head"><h2>Find the striker, lift him to 3D</h2></div>
         <p class="cap">SAM 3 finds "baseball batter" from text. SAM 3D Body recovers 70 keypoints in 3D, hands included.</p>
         <div class="media two">
           <figure><video src="media/02_perception.mp4" autoplay muted loop playsinline preload="metadata" aria-label="Detection box and 2D keypoints on the clip"></video><figcaption>box + keypoints</figcaption></figure>
@@ -175,7 +165,7 @@
     <article class="scene" id="retarget">
       <div class="node">03</div>
       <div class="card glass">
-        <div class="head"><h2>Retarget to a G1 holding a real bat</h2><div class="tags"><span class="tag">MuJoCo</span><span class="tag">IK</span><span class="tag">28 in youth bat</span></div></div>
+        <div class="head"><h2>Retarget to a G1 holding a real bat</h2></div>
         <p class="cap">IK maps the body onto a Unitree G1, with both hands on the bat. The clip is mirrored, so the robot bats right-handed.</p>
         <video src="media/04_retarget.mp4" autoplay muted loop playsinline preload="metadata" aria-label="Mirrored clip next to the retargeted G1"></video>
       </div>
@@ -184,13 +174,13 @@
     <article class="scene" id="claude">
       <div class="node">04</div>
       <div class="card glass">
-        <div class="head"><h2>Claude as the critic</h2><div class="tags"><span class="tag claude">Claude Opus 5.5</span><span class="tag">self-improving harness</span></div></div>
+        <div class="head"><h2>Claude as the critic</h2></div>
         <p class="cap">Every generation is checked against physics. Claude reads the numbers and the contact sheet, then patches the pipeline.</p>
         <div class="flow" aria-label="The critic loop">
-          <div class="step"><b>Perceive + retarget</b><small>SAM 3D → IK → G1</small></div><span class="to">→</span>
-          <div class="step"><b>Physics ladder</b><small>jitter · foot skate · penetration · torque limits</small></div><span class="to">→</span>
-          <div class="step hot"><b>Claude</b><small>reads it, writes a config patch with a hypothesis</small></div><span class="to">→</span>
-          <div class="step gt"><b>Referee</b><small>Penn Action labels, used only to grade</small></div>
+          <div class="step glass"><b>Perceive + retarget</b><small>SAM 3D → IK → G1</small></div><span class="to">→</span>
+          <div class="step glass"><b>Physics ladder</b><small>jitter · foot skate · penetration · torque limits</small></div><span class="to">→</span>
+          <div class="step hot glass"><b>Claude</b><small>reads it, writes a config patch with a hypothesis</small></div><span class="to">→</span>
+          <div class="step gt glass"><b>Referee</b><small>Penn Action labels, used only to grade</small></div>
         </div>
         <p class="loopback">↺ <em>patch</em> → next generation</p>
         <div class="media sheet">
@@ -202,13 +192,13 @@
     <article class="scene" id="policy">
       <div class="node">05</div>
       <div class="card glass">
-        <div class="head"><h2>Simulation becomes a training task</h2><div class="tags"><span class="tag">tracking env</span><span class="tag">50 Hz</span><span class="tag">29 joints</span></div></div>
+        <div class="head"><h2>Simulation becomes a training task</h2></div>
         <p class="cap">The swing becomes a target. The policy sees its body and where the swing goes next, and outputs corrections to joint targets.</p>
         <div class="flow" aria-label="The tracking task">
-          <div class="step"><b>Reference swing</b><small>joint angles every 20 ms</small></div><span class="to">→</span>
-          <div class="step"><b>Observe</b><small>gravity, joints, velocities, next targets</small></div><span class="to">→</span>
-          <div class="step hot"><b>Policy</b><small>residual on PD targets</small></div><span class="to">→</span>
-          <div class="step"><b>Reward</b><small>pose · key bodies · height · balance</small></div>
+          <div class="step glass"><b>Reference swing</b><small>joint angles every 20 ms</small></div><span class="to">→</span>
+          <div class="step glass"><b>Observe</b><small>gravity, joints, velocities, next targets</small></div><span class="to">→</span>
+          <div class="step hot glass"><b>Policy</b><small>residual on PD targets</small></div><span class="to">→</span>
+          <div class="step glass"><b>Reward</b><small>pose · key bodies · height · balance</small></div>
         </div>
       </div>
     </article>
@@ -216,20 +206,20 @@
     <article class="scene" id="rl">
       <div class="node">06</div>
       <div class="card glass">
-        <div class="head"><h2>RL on a laptop</h2><div class="tags"><span class="tag">PPO</span><span class="tag">M1 Pro CPU</span><span class="tag">~7k steps/s</span></div></div>
+        <div class="head"><h2>RL on a laptop</h2></div>
         <p class="cap">A helping force holds it up at first, then fades to zero. After that the robot balances through the whole swing on its own.</p>
         <div class="media wide-narrow">
-          <div class="chart">
+          <div class="chart glass">
             <p class="legend"><span><i style="background:var(--ball)"></i>reward</span><span><i style="background:var(--sky)"></i>helping force</span></p>
             <svg id="curve" viewBox="0 0 400 220" role="img" aria-label="Training curve: reward rises while the helping force fades to zero"></svg>
           </div>
           <figure><video src="media/05_rollout.mp4" autoplay muted loop playsinline preload="metadata" aria-label="Reference swing next to the policy in physics"></video><figcaption>left: reference · right: policy in physics, no help</figcaption></figure>
         </div>
         <div class="stats">
-          <div class="stat"><b>0</b><span>helping force</span></div>
-          <div class="stat"><b>121/121</b><span>steps, no fall</span></div>
-          <div class="stat"><b>7.7 cm</b><span>key-body error</span></div>
-          <div class="stat"><b>45 min</b><span>of training</span></div>
+          <div class="stat glass"><b>0</b><span>helping force</span></div>
+          <div class="stat glass"><b>121/121</b><span>steps, no fall</span></div>
+          <div class="stat glass"><b>6.6 cm</b><span>key-body error</span></div>
+          <div class="stat glass"><b>70 min</b><span>of training</span></div>
         </div>
       </div>
     </article>
@@ -237,7 +227,7 @@
     <article class="scene" id="play">
       <div class="node">07</div>
       <div class="card glass">
-        <div class="head"><h2>Step up to the plate</h2><div class="tags"><span class="tag">MuJoCo WASM</span><span class="tag">in your browser</span></div></div>
+        <div class="head"><h2>Step up to the plate</h2></div>
         <p class="cap">The same physics, live: a pitching machine, a catcher, the 2026 ABS strike zone, and a switch for the trained policy.</p>
         <div class="media wide-narrow">
           <img src="media/demo_machine.jpg" alt="The batting cage from behind the pitching machine" loading="lazy">
