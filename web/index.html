@@ -498,7 +498,7 @@ const ZONE = [];
 let zoneSel = 4, mph = 45;
 for (let k = 0; k < 9; k++) {
   const b = document.createElement("button");
-  b.setAttribute("aria-label", `${["high", "middle", "low"][Math.floor(k / 3)]} ${["inside", "middle", "away"][k % 3]}`);
+  b.setAttribute("aria-label", `${["high", "middle", "low"][Math.floor(k / 3)]} ${["away", "middle", "inside"][k % 3]}`);
   b.setAttribute("aria-pressed", String(k === zoneSel));
   b.addEventListener("click", () => { zoneSel = k; ZONE.forEach((z, j) => z.setAttribute("aria-pressed", String(j === k))); });
   $("zone").appendChild(b); ZONE.push(b);
@@ -674,7 +674,8 @@ function pitch() {
   // top row: up where this swing meets the ball (a high pitch); middle and low rows: the upper and lower strike zone
   const usePolicy = policyMode && policy, hit = usePolicy ? polContact : contact, tHit = usePolicy ? polContactT : T_CONTACT;
   const z = [hit.z, SZ.top - zoneH * 0.3, SZ.bot + zoneH * 0.25][row];
-  const lat = row === 0 ? (col - 1) * 0.06 * hand : [-0.12, 0, 0.32][col] * hand;
+  // columns as seen from behind the machine: away (a ball), middle, inside (toward the batter, still a strike)
+  const lat = row === 0 ? (col - 1) * 0.06 * hand : [-0.32, 0, 0.12][col] * hand;
   // the top row is aimed where the bat meets the ball, the zone rows at the zone itself (the plate's midpoint)
   const target = plate.clone().addScaledVector(toP, row === 0 ? hit.clone().sub(plate).dot(toP) : zoneU).addScaledVector(side, lat + (row === 0 ? hit.clone().sub(plate).dot(side) : 0)).setZ(z)
     .add(new THREE.Vector3(noise(0.015), noise(0.015), noise(0.015)));     // the machine scatters about 1.5 cm
