@@ -115,11 +115,11 @@
 <div id="stage"></div>
 <div id="loading"><div class="ring" aria-hidden="true"></div><p id="load-msg">Loading physics</p></div>
 
-<div class="tally glass" id="tally" aria-label="Session totals">
-  <span><b id="t-p">0</b><small>P</small></span>
+<div class="tally glass" id="tally" aria-label="Count, outs and hits">
+  <span><b id="t-count">0-0</b><small>COUNT</small></span>
+  <span><b id="t-outs">0</b><small>OUT</small></span>
   <span><b id="t-h">0</b><small>H</small></span>
   <span><b id="t-hr">0</b><small>HR</small></span>
-  <span><b id="t-best">0</b><small>M</small></span>
 </div>
 
 <div class="hud glass" id="hud" aria-live="polite">
@@ -138,7 +138,7 @@
   <button class="icon-btn" data-cam="machine" aria-pressed="true" title="Behind the machine" aria-label="Behind the machine">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8" cy="9" r="4"/><circle cx="16" cy="9" r="4"/><path d="M12 13v8M7 21l5-8 5 8"/></svg>
   </button>
-  <button class="icon-btn" data-cam="catcher" aria-pressed="false" title="Catcher" aria-label="Catcher view">
+  <button class="icon-btn" data-cam="catcher" aria-pressed="false" title="Behind the plate" aria-label="Behind the plate">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9a8 8 0 0 1 16 0v4a8 8 0 0 1-16 0z"/><path d="M4 12h16M9 5v14M15 5v14"/></svg>
   </button>
   <button class="icon-btn" data-cam="side" aria-pressed="false" title="Side" aria-label="Side view">
@@ -458,192 +458,6 @@ function callPitch(p) {                               // p: where the ball cross
   return strike;
 }
 
-// ---------- the catcher: an adult (1.83 m) in gear, squatting behind the plate. He sets a target, tracks the pitch with
-// his mitt, receives it (the mitt closes and gives), frames it, moves it to his throwing hand and lobs it back to the machine.
-// Rig in his own frame: +x toward the machine, +y his left, +z up; legs and arms solved with two-bone IK every frame. ----------
-const catcherAt = plate.clone().addScaledVector(toP, -0.85);
-const CATCH_X = 0.3;                                  // where he receives, in front of his feet
-const catchU = CATCH_X - 0.85;                        // the same plane, along the pitch line from the plate
-const V3 = (x, y, z) => new THREE.Vector3(x, y, z);
-const cLocal = (p) => { const d = p.clone().sub(catcherAt); return V3(d.dot(toP), d.dot(side), p.z); };
-const cDir = (v) => V3(v.dot(toP), v.dot(side), v.z);
-const cWorld = (l) => catcherAt.clone().addScaledVector(toP, l.x).addScaledVector(side, l.y).setZ(l.z);
-const catcher = new THREE.Group();
-catcher.position.set(catcherAt.x, catcherAt.y, 0); catcher.rotation.z = ang; world.add(catcher);
-const ctMat = (color, o = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.65, ...o });
-const skin = ctMat("#b97a56", { roughness: 0.55 }), jersey = ctMat("#1b2840"), pants = ctMat("#d6d2c8", { roughness: 0.85 });
-const gearM = ctMat("#24407a", { roughness: 0.38, metalness: 0.2 }), trim = ctMat("#ffb43a", { roughness: 0.5 }), cleat = ctMat("#111", { roughness: 0.45 });
-const cageM = ctMat("#1d2023", { metalness: 0.85, roughness: 0.3 }), leather = ctMat("#8a5426", { roughness: 0.5 }), leatherDk = ctMat("#4a2a12", { roughness: 0.7 });
-const _bx = new THREE.Vector3(), _by = new THREE.Vector3(), _bz = new THREE.Vector3(), _bm = new THREE.Matrix4(), FWD = V3(1, 0, 0), UP = V3(0, 0, 1);
-function orient(o, y, hint) {                          // o's +y along y, its +z toward the hint
-  _by.copy(y).normalize(); _bx.crossVectors(_by, hint).normalize(); _bz.crossVectors(_bx, _by);
-  o.quaternion.setFromRotationMatrix(_bm.makeBasis(_bx, _by, _bz));
-}
-function limbMesh(r0, r1, mat, depth = 1) {           // a unit tapered limb along +y, radius r0 at its root
-  const g = new THREE.CylinderGeometry(r1, r0, 1, 16, 1); g.translate(0, 0.5, 0); g.scale(1, 1, depth);
-  const m = new THREE.Mesh(g, mat); catcher.add(m); return m;
-}
-function span(m, a, b, hint = FWD) { orient(m, b.clone().sub(a), hint); m.position.copy(a); m.scale.y = a.distanceTo(b); }
-function joint(r, mat, sx = 1, sy = 1, sz = 1) { const m = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12), mat); m.scale.set(sx, sy, sz); catcher.add(m); return m; }
-function twoBone(a, t, l1, l2, pole) {                // returns the knee/elbow and the reachable end
-  const d = t.clone().sub(a), L = THREE.MathUtils.clamp(d.length(), Math.abs(l1 - l2) + 1e-3, (l1 + l2) * 0.999), u = d.normalize();
-  const x = (l1 * l1 - l2 * l2 + L * L) / (2 * L), h = Math.sqrt(Math.max(0, l1 * l1 - x * x));
-  const p = pole.clone().addScaledVector(u, -pole.dot(u)).normalize();
-  return [a.clone().addScaledVector(u, x).addScaledVector(p, h), a.clone().addScaledVector(u, L)];
-}
-// body parts
-const C = {
-  pelvis: joint(0.14, pants, 1.25, 0.9, 0.85),
-  torso: new THREE.Group(), head: new THREE.Group(), mitt: new THREE.Group(),
-  thigh: [limbMesh(0.09, 0.065, pants), limbMesh(0.09, 0.065, pants)], knee: [joint(0.068, gearM), joint(0.068, gearM)],
-  shin: [limbMesh(0.068, 0.055, gearM, 0.85), limbMesh(0.068, 0.055, gearM, 0.85)], foot: [limbMesh(0.045, 0.038, cleat, 0.7), limbMesh(0.045, 0.038, cleat, 0.7)],
-  upper: [limbMesh(0.055, 0.045, jersey), limbMesh(0.055, 0.045, jersey)], elbow: [joint(0.045, jersey), joint(0.045, jersey)],
-  fore: [limbMesh(0.042, 0.033, skin), limbMesh(0.042, 0.033, jersey)], shoulder: [joint(0.07, gearM), joint(0.07, gearM)],
-  neck: limbMesh(0.05, 0.048, skin), hand: joint(0.045, skin, 0.9, 1, 1.25),
-};
-{ // trunk: jersey, a segmented chest protector with an orange trim, padded shoulders
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.15, 1, 18).translate(0, 0.5, 0).scale(1, 1, 0.66), jersey);
-  const shell = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.17, 0.86, 18, 1, true, -1.3, 2.6).translate(0, 0.5, 0).scale(1, 1, 0.78), gearM);
-  shell.material = gearM.clone(); shell.material.side = THREE.DoubleSide;
-  C.torso.add(trunk, shell);
-  for (const [y, r] of [[0.2, 0.178], [0.42, 0.185], [0.64, 0.193], [0.92, 0.203]]) {   // arcs across the front, over the shell
-    const ridge = new THREE.Mesh(new THREE.TorusGeometry(r, 0.008, 6, 20, 2.6).rotateZ(Math.PI / 2 - 1.3).rotateX(Math.PI / 2).scale(1, 1, 0.78), trim);
-    ridge.position.y = y; C.torso.add(ridge);
-  }
-  catcher.add(C.torso);
-}
-{ // head: face behind a hockey-style catcher's helmet with a wire cage and a throat guard (+x = gaze)
-  const face = new THREE.Mesh(new THREE.SphereGeometry(0.092, 18, 14), skin); face.position.set(0.012, 0, -0.012);
-  const shell = new THREE.Mesh(new THREE.SphereGeometry(0.128, 26, 16, Math.PI + 0.85, 2 * Math.PI - 1.7, 0, 0.62 * Math.PI).rotateX(Math.PI / 2), gearM);
-  const cap = new THREE.Mesh(new THREE.SphereGeometry(0.13, 26, 8, 0, 2 * Math.PI, 0, 0.28 * Math.PI).rotateX(Math.PI / 2), gearM);
-  C.head.add(face, shell, cap);
-  for (const [z, r] of [[0.03, 0.135], [-0.02, 0.138], [-0.07, 0.132], [-0.11, 0.12]]) {
-    const bar = new THREE.Mesh(new THREE.TorusGeometry(r, 0.0055, 6, 18, 1.9).rotateZ(-0.95), cageM); bar.position.z = z; C.head.add(bar);
-  }
-  for (const y of [-0.035, 0.035]) {
-    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.0055, 0.0055, 0.16, 6), cageM); bar.rotation.x = Math.PI / 2; bar.position.set(0.134, y, -0.04); C.head.add(bar);
-  }
-  const throat = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.07, 0.08), cageM); throat.position.set(0.1, 0, -0.17); C.head.add(throat);
-  catcher.add(C.head);
-}
-const hinges = [];
-{ // catcher's mitt (+x = pocket face, +z = fingers, thumb toward -y): padded rim and pocket in two halves that fold shut
-  const back = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), leather); back.scale.set(0.055, 0.135, 0.15); back.position.x = -0.035;
-  C.mitt.add(back);
-  for (const s of [1, -1]) {
-    const hinge = new THREE.Group(); hinge.scale.y = s;
-    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.11, 0.036, 10, 18, Math.PI).rotateY(Math.PI / 2), leather);
-    const pocket = new THREE.Mesh(new THREE.CircleGeometry(0.11, 16, 0, Math.PI).rotateY(Math.PI / 2), leatherDk);
-    pocket.position.x = -0.004;
-    hinge.add(rim, pocket); hinges.push(hinge); C.mitt.add(hinge);
-  }
-  const web = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.05, 0.07), leatherDk); web.position.set(0.0, 0, 0.115); C.mitt.add(web);
-  catcher.add(C.mitt);
-}
-catcher.traverse((o) => { o.castShadow = true; });
-// the squat and the poses he moves between (his frame)
-const ANKLE = [V3(-0.07, 0.3, 0.11), V3(-0.09, -0.3, 0.11)], TOE = [V3(0.1, 0.35, 0.025), V3(0.08, -0.35, 0.025)];   // up on the balls of his feet
-const HIP = V3(-0.25, 0, 0.47), NECK = V3(-0.02, 0, 0.92);   // heels under the hips, knees out over the toes
-const MITT_HOME = V3(CATCH_X, 0.02, (SZ.bot + SZ.top) / 2), MITT_CHEST = V3(0.16, 0.02, 0.8), MITT_POINT = V3(0.3, 0.14, 0.95);
-const HAND_BACK = V3(-0.33, -0.1, 0.6), HAND_COCK = V3(-0.04, -0.34, 1.2), HAND_FOLLOW = V3(0.36, -0.12, 0.98);
-const ct = { mode: "set", t: 0, pos: MITT_HOME.clone(), vel: V3(0, 0, 0), goal: MITT_HOME.clone(), close: 0, give: 0, frame: V3(0, 0, 0),
-             hand: HAND_BACK.clone(), hvel: V3(0, 0, 0), hgoal: HAND_BACK.clone(), n: FWD.clone(), held: null };
-const heldAt = new THREE.Vector3();                   // where the ball sits while he holds it (world)
-const hopperAt = mound.clone().addScaledVector(toP, 0.56).setZ(RELEASE_Z + 0.5);
-function spring(p, v, goal, w, dt) {                   // critically damped
-  for (let k = 0, n = Math.ceil(dt / 0.005), h = dt / n; k < n; k++) {
-    v.addScaledVector(goal.clone().sub(p), w * w * h).multiplyScalar(1 - 2 * w * h); p.addScaledVector(v, h);
-  }
-}
-function catcherSet(target) {                         // he sets up where the pitch is aimed
-  const l = cLocal(target); ct.mode = "set"; ct.t = 0; ct.held = null; ct.close = 0; ct.frame.set(0, 0, 0);
-  ct.goal.set(CATCH_X, THREE.MathUtils.clamp(l.y, -0.45, 0.5), THREE.MathUtils.clamp(l.z, 0.25, 1.15)); ct.hgoal.copy(HAND_BACK);
-}
-function catcherCatch(p) {
-  ct.mode = "catch"; ct.t = 0; ct.held = "mitt"; ct.pos.copy(cLocal(p)); ct.vel.set(0, 0, 0); ct.goal.copy(ct.pos);
-  // framing: a pitch just off the zone gets a quiet pull toward it
-  const zc = cLocal(plate.clone().setZ((SZ.bot + SZ.top) / 2)), off = V3(0, zc.y - ct.pos.y, zc.z - ct.pos.z);
-  ct.frame.copy(off.multiplyScalar(Math.min(0.035, off.length() * 0.2) / Math.max(off.length(), 1e-6)));
-}
-function throwBack(from) {                            // a lob into the machine's hopper, about a second in the air
-  const T = 1.05, v = hopperAt.clone().sub(from).divideScalar(T); v.z += 0.5 * 9.81 * T;
-  sim.inMitt = false; sim.phase = "return"; placeBall(from, v); ct.held = null;
-}
-function catcherUpdate(dt) {
-  ct.t += dt;
-  const bp = ballPos(), bl = cLocal(bp), flying = sim.phase === "flight" || sim.phase === "tipped";
-  if (ct.mode === "set" && flying && sim.t > sim.launchAt + 0.1) ct.mode = "track";
-  if (ct.mode === "track") {
-    if (flying) {                                       // predict where the ball crosses his receiving plane
-      const v = cDir(ballVel());
-      if (v.x < -1 && bl.x > CATCH_X) {
-        const T = (bl.x - CATCH_X) / -v.x;
-        ct.goal.set(CATCH_X, bl.y + v.y * T, bl.z + v.z * T - 4.9 * T * T);
-        ct.goal.y = THREE.MathUtils.clamp(ct.goal.y, -0.55, 0.6); ct.goal.z = THREE.MathUtils.clamp(ct.goal.z, 0.15, 1.3);
-        ct.n.copy(v).negate().normalize().lerp(FWD, 0.4).normalize();
-      }
-    } else if (!sim.inMitt) { ct.mode = "set"; ct.goal.copy(MITT_HOME); }     // put in play
-  }
-  let give = 0;
-  if (ct.mode === "catch") {                           // pocket shuts, the mitt gives a few cm, then sticks and frames
-    ct.close = Math.min(1, ct.t / 0.05);
-    give = ct.t < 0.06 ? ct.t / 0.06 : Math.exp(-(ct.t - 0.06) / 0.12);
-    ct.goal.copy(ct.pos);
-    if (ct.t > 0.75) { ct.mode = "transfer"; ct.t = 0; }
-  } else if (ct.mode === "transfer") {                 // mitt to the chest, the bare hand meets it and takes the ball
-    ct.goal.copy(MITT_CHEST); ct.n.copy(V3(0.2, -1, 0.1)).normalize();
-    ct.hgoal.copy(MITT_CHEST).add(V3(0.06, -0.09, 0));
-    if (ct.t > 0.32) { ct.held = "hand"; ct.close = Math.max(0, 1 - (ct.t - 0.32) / 0.1); }
-    if (ct.t > 0.42) { ct.mode = "throw"; ct.t = 0; }
-  } else if (ct.mode === "throw") {                    // short arm action from the squat: cock behind the ear, release, follow through
-    ct.goal.copy(MITT_POINT); ct.n.copy(FWD);
-    ct.hgoal.copy(ct.t < 0.22 ? HAND_COCK : HAND_FOLLOW);
-    if (ct.held === "hand" && ct.t > 0.3) throwBack(heldAt.clone());
-    if (ct.t > 0.75) { ct.mode = "set"; ct.goal.copy(MITT_HOME); ct.hgoal.copy(HAND_BACK); ct.n.copy(FWD); }
-  } else if (ct.mode === "set") ct.n.lerp(FWD, Math.min(1, dt * 6)).normalize();
-  if (ct.mode !== "catch") spring(ct.pos, ct.vel, ct.goal, ct.mode === "track" ? 22 : 9, dt);
-  else { const k = ct.t > 0.12 ? Math.min(1, dt * 8) : 0; ct.pos.addScaledVector(ct.frame, k); ct.frame.multiplyScalar(1 - k); }
-  spring(ct.hand, ct.hvel, ct.hgoal, ct.mode === "throw" ? 26 : 12, dt);
-  // the mitt frame: face toward the ball, fingers up; tipped forward for low balls, turned over for backhands
-  const pocket = ct.pos.clone().addScaledVector(FWD, -0.06 * give);
-  const low = THREE.MathUtils.clamp((0.5 - pocket.z) / 0.25, 0, 1), back = THREE.MathUtils.clamp((-0.02 - pocket.y) * 1.6, 0, 0.7);
-  const n = ct.n.clone(), f = UP.clone().addScaledVector(FWD, 0.9 * low).add(V3(0, back, 0));
-  f.addScaledVector(n, -f.dot(n)).normalize();
-  const sAx = new THREE.Vector3().crossVectors(f, n);
-  C.mitt.quaternion.setFromRotationMatrix(_bm.makeBasis(n, sAx, f)); C.mitt.position.copy(pocket);
-  hinges[0].rotation.z = -0.8 * ct.close; hinges[1].rotation.z = 0.8 * ct.close;
-  const wrist = pocket.clone().addScaledVector(f, -0.1).addScaledVector(n, -0.05);
-  // the body follows the mitt: weight shifts sideways, the chest leans in when the reach runs out
-  const lat = THREE.MathUtils.clamp(pocket.y * 0.3, -0.1, 0.1);
-  const hip = HIP.clone().add(V3(0, lat, 0)), neck = NECK.clone().add(V3(0, lat * 1.4, 0));
-  const shoulders = (nk) => [nk.clone().add(V3(-0.02, 0.19, -0.04)), nk.clone().add(V3(-0.02, -0.19, -0.04))];
-  let [shL] = shoulders(neck);
-  const short = wrist.distanceTo(shL) - 0.56;
-  if (short > 0) neck.addScaledVector(wrist.clone().sub(shL).normalize(), Math.min(short, 0.2));
-  const [sL, sR] = shoulders(neck);
-  C.pelvis.position.copy(hip); orient(C.pelvis, neck.clone().sub(hip), FWD);
-  C.torso.position.copy(hip); orient(C.torso, neck.clone().sub(hip), FWD); C.torso.scale.y = hip.distanceTo(neck);
-  for (let s = 0; s < 2; s++) {
-    const hj = hip.clone().add(V3(0, s ? -0.1 : 0.1, -0.03));
-    const [knee, ankle] = twoBone(hj, ANKLE[s], 0.45, 0.45, V3(1, s ? -0.45 : 0.45, 0.35));
-    span(C.thigh[s], hj, knee); C.knee[s].position.copy(knee);
-    span(C.shin[s], knee, ankle); span(C.foot[s], ankle, TOE[s], UP);
-  }
-  const [eL, wL] = twoBone(sL, wrist, 0.3, 0.27, V3(-0.2, 0.8, -1));
-  span(C.upper[0], sL, eL); C.elbow[0].position.copy(eL); span(C.fore[0], eL, wL);
-  const [eR, wR] = twoBone(sR, ct.hand, 0.3, 0.27, ct.mode === "throw" ? V3(-0.3, -1, 0.2) : V3(-0.4, -1, -0.5));
-  span(C.upper[1], sR, eR); C.elbow[1].position.copy(eR); span(C.fore[1], eR, wR); C.hand.position.copy(wR);
-  C.shoulder[0].position.copy(sL); C.shoulder[1].position.copy(sR);
-  // head: eyes on the ball while it is live, on the machine otherwise
-  const headC = neck.clone().add(V3(0.05, 0, 0.17)), look = flying || sim.phase === "batted" ? bl : cLocal(release);
-  span(C.neck, neck, headC.clone().add(V3(0, 0, -0.08)));
-  C.head.position.copy(headC);
-  const gaze = look.clone().sub(headC).normalize(), hy = new THREE.Vector3().crossVectors(UP, gaze).normalize();
-  C.head.quaternion.setFromRotationMatrix(_bm.makeBasis(gaze, hy, new THREE.Vector3().crossVectors(gaze, hy)));
-  if (ct.held === "mitt") heldAt.copy(cWorld(pocket.clone().addScaledVector(n, 0.015)));
-  else if (ct.held === "hand") heldAt.copy(cWorld(wR.clone().addScaledVector(FWD, 0.04)));
-}
-
 // ---------- cameras ----------
 const CAMS = {   // [eye, look-at, vertical field of view]
   machine: () => [mound.clone().addScaledVector(toP, 7.5).setZ(3.4), plate.clone().addScaledVector(toP, 1.2).setZ(0.7), 22],
@@ -660,7 +474,6 @@ function setCam(name, snap = true) {
   const [eye, look, fov] = CAMS[name](); aimShot(eye, look, fov);
   if (snap) { camera.position.copy(shot.eye); controls.target.copy(shot.look); camera.fov = fov; camera.updateProjectionMatrix(); controls.update(); }
   for (const b of $("cams").children) b.setAttribute("aria-pressed", String(b.dataset.cam === name));
-  for (const m of zoneMats) m.depthTest = name === "catcher";        // from behind him, the catcher hides the zone
 }
 controls.addEventListener("start", () => { director = false; });   // the viewer took the camera
 $("cams").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setCam(b.dataset.cam); });
@@ -699,7 +512,7 @@ const pol = { on: false, t: 0, k: 0, last: new Float32Array(policy ? policy.act_
 // training episodes end 1 s after the follow-through; the policy balances for half of that, then the robot is held still
 const POLICY_END_PAD = 25;
 let polContact = contact, polContactT = T_CONTACT;    // where and when the policy's own bat meets the ball (measured below)
-let policyMode = false;
+let policyMode = !!policy;                            // the trained policy bats by default when its weights loaded
 function policyObs(t) {
   mj.mj_kinematics(model, data);                        // the pelvis orientation now, whatever the frame timing
   const P = policy, T = P.frames, n = NQ_ROBOT, q = data.qpos, v = data.qvel, xm = data.xmat, b = bodyId("pelvis") * 9;
@@ -820,8 +633,8 @@ function collide(prev, now, bp, bv, h = DT) {
 // The robot times its swing from the ball's launch and speed; its timing scatters like a good hitter's (~7 ms).
 let TIMING_SD = 0.007, noiseOn = true;
 const noise = (sd) => noiseOn ? sd * Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random()) : 0;
-const tally = { p: 0, h: 0, hr: 0, best: 0 };
-const drawTally = () => { $("t-p").textContent = tally.p; $("t-h").textContent = tally.h; $("t-hr").textContent = tally.hr; $("t-best").textContent = tally.best.toFixed(1); };
+const tally = { h: 0, hr: 0 }, count = { b: 0, s: 0, outs: 0 };
+const drawTally = () => { $("t-count").textContent = `${count.b}-${count.s}`; $("t-outs").textContent = count.outs; $("t-h").textContent = tally.h; $("t-hr").textContent = tally.hr; };
 let hudTimer = 0;
 function hud(word, kind, nums) {
   $("h-word").textContent = word; $("h-word").className = "word " + (kind || "");
@@ -830,7 +643,7 @@ function hud(word, kind, nums) {
   $("hud").classList.add("show");
   clearTimeout(hudTimer); hudTimer = setTimeout(() => $("hud").classList.remove("show"), 3800);
 }
-let sim = { t: 0, swingAt: Infinity, launchAt: Infinity, phase: "idle", contact: null, landed: false, inMitt: false };
+let sim = { t: 0, swingAt: Infinity, launchAt: Infinity, phase: "idle", contact: null, landed: false, gone: false };
 let wheelSpin = 4;
 const PARK = new THREE.Vector3(0, 0, 50);               // off-field between pitches
 placeBall(PARK, new THREE.Vector3());
@@ -862,23 +675,23 @@ function pitch() {
   const usePolicy = policyMode && policy, hit = usePolicy ? polContact : contact, tHit = usePolicy ? polContactT : T_CONTACT;
   const z = [hit.z, SZ.top - zoneH * 0.3, SZ.bot + zoneH * 0.25][row];
   const lat = row === 0 ? (col - 1) * 0.06 * hand : [-0.12, 0, 0.32][col] * hand;
-  const target = plate.clone().addScaledVector(toP, hit.clone().sub(plate).dot(toP)).addScaledVector(side, lat + (row === 0 ? hit.clone().sub(plate).dot(side) : 0)).setZ(z)
+  // the top row is aimed where the bat meets the ball, the zone rows at the zone itself (the plate's midpoint)
+  const target = plate.clone().addScaledVector(toP, row === 0 ? hit.clone().sub(plate).dot(toP) : zoneU).addScaledVector(side, lat + (row === 0 ? hit.clone().sub(plate).dot(side) : 0)).setZ(z)
     .add(new THREE.Vector3(noise(0.015), noise(0.015), noise(0.015)));     // the machine scatters about 1.5 cm
   const { v, T } = aim(release, target, speed);
   const reach = Math.abs(target.z - hit.z) <= SWING_WINDOW.up && Math.abs(target.clone().sub(hit).dot(side)) <= SWING_WINDOW.lat;
   const lead = Math.max(0.35, tHit - T + 0.2);
   sim = { t: 0, launchAt: lead, swingAt: reach ? lead + T - tHit + noise(TIMING_SD) : Infinity, phase: "pitch",
           contact: null, landed: false, v, crossed: null, strike: false, swung: reach };
-  tally.p++; drawTally();
   $("pitch").disabled = true;
   pitchDot.visible = false;
   trailN = 0; trailGeo.setDrawRange(0, 0);
-  catcherSet(target);                                   // the catcher sets up where the pitch is aimed
   if (camMode === "machine") setCam("machine", false);
 }
 $("pitch").addEventListener("click", pitch);
 addEventListener("keydown", (e) => { if (e.code === "Space") { e.preventDefault(); pitch(); } });
 $("brain").disabled = !policy;
+$("brain").setAttribute("aria-pressed", String(policyMode));
 $("brain").addEventListener("click", () => {
   policyMode = !policyMode; $("brain").setAttribute("aria-pressed", String(policyMode));
 });
@@ -890,7 +703,7 @@ $("auto").addEventListener("click", () => {
 });
 function finish(word, kind, nums) {
   hud(word, kind, nums); drawTally(); sim.phase = "done";
-  setTimeout(() => { if ((sim.phase === "done" || sim.phase === "return") && camMode === "machine") setCam("machine", false); }, 2200);
+  setTimeout(() => { if (sim.phase === "done" && camMode === "machine") setCam("machine", false); }, 2200);
   setTimeout(() => { $("pitch").disabled = false; }, 500);
   clearTimeout(autoTimer);
   if ($("auto").getAttribute("aria-pressed") === "true") autoTimer = setTimeout(pitch, 2600);
@@ -902,8 +715,7 @@ function step() {
   if (policyMode && policy && sim.t >= sim.swingAt) policyStep();
   else { pol.on = false; setSwing(Math.max(0, sim.t - sim.swingAt)); }
   if (sim.phase === "pitch" && sim.t >= sim.launchAt) { placeBall(release, sim.v); sim.phase = "flight"; wheelSpin = 60; }
-  if (sim.inMitt) { placeBall(heldAt, new THREE.Vector3()); }
-  else if (sim.phase === "idle" || sim.phase === "pitch") { placeBall(PARK, new THREE.Vector3()); }
+  if (sim.phase === "idle" || sim.phase === "pitch" || sim.gone) { placeBall(PARK, new THREE.Vector3()); }
   else if (sim.phase === "flight" || sim.phase === "batted" || sim.phase === "tipped") {
     const f = drag(ballVel()).multiplyScalar(BALL_M);
     data.xfrc_applied[ballBody * 6] = f.x; data.xfrc_applied[ballBody * 6 + 1] = f.y; data.xfrc_applied[ballBody * 6 + 2] = f.z;
@@ -913,11 +725,6 @@ function step() {
   if (pol.on && pol.k % 2 === 0) return;
   model.opt.timestep = h;
   mj.mj_step(model, data);
-  if (sim.phase === "return") {                         // the catcher's lob drops into the hopper
-    const b = ballPos();
-    if (b.distanceTo(hopperAt) < 0.4 || b.z < 0.2) { placeBall(PARK, new THREE.Vector3()); sim.phase = "done"; }
-    return;
-  }
   if (sim.phase !== "flight" && sim.phase !== "batted" && sim.phase !== "tipped") return;
   const now = batFrame(), bp = ballPos(), bv = ballVel();
   const u = bp.clone().sub(plate).dot(toP);
@@ -929,34 +736,60 @@ function step() {
       placeBall(bp, out);
       const s = out.length(), launch = Math.atan2(out.z, Math.hypot(out.x, out.y)) * 180 / Math.PI;
       sim.contact = { s, launch }; sim.phase = "batted"; trailN = 0;
-    } else if (out) {                                   // foul tip back toward the catcher
+    } else if (out) {                                   // tipped back: a foul
       placeBall(bp, out); sim.phase = "tipped";
-    } else if (u <= catchU) {
-      caught(); finish(sim.swung ? "Swinging strike" : sim.strike ? "Strike" : "Ball", sim.swung || sim.strike ? "bad" : "good",
-                       ["–", "–", "–", sim.swung ? "S" : call()]);
+    } else if (!sim.swung && hitsBatter(bp)) {
+      gone(); finish(atBat("hbp") || "Hit by pitch", "good", ["–", "–", "–", "HBP"]);
+    } else if (u <= zoneU) {                            // past the zone untouched: called or missed, and out of play
+      gone();
+      const k = sim.swung || sim.strike ? atBat("strike") : atBat("ball");
+      finish(k || (sim.swung ? "Swinging strike" : sim.strike ? "Strike" : "Ball"), sim.swung || sim.strike ? "bad" : "good",
+             ["–", "–", "–", sim.swung ? "S" : call()]);
     }
   } else if (sim.phase === "tipped") {
-    if (u <= catchU || bp.z < 0.1) { caught(); finish("Foul tip, caught", "bad", ["–", "–", "–", "S"]); }
+    if (u <= zoneU || bp.z < 0.1) { gone(); atBat("foul"); finish("Foul", "bad", ["–", "–", "–", "S"]); }
   } else {
     const rel = bp.clone().sub(plate), d = Math.hypot(rel.x, rel.y);
     const off = Math.abs(Math.atan2(toP.x * rel.y - toP.y * rel.x, rel.x * toP.x + rel.y * toP.y)) * 180 / Math.PI;
     const nums = () => [(sim.contact.s / MPH).toFixed(0), `${sim.contact.launch.toFixed(0)}°`, d.toFixed(1), call()];
     if (!sim.landed && d >= FENCE_M && bp.z > FENCE_H && off <= 45) {
-      sim.landed = true; tally.hr++; tally.h++; tally.best = Math.max(tally.best, d); finish("Home run", "good", nums());
+      sim.landed = true; tally.hr++; tally.h++; atBat("inplay"); finish("Home run", "good", nums());
     } else if (!sim.landed && bp.z <= BALL_R + 0.005 && bv.z <= 0) {
       sim.landed = true;
-      if (off > 45 || rel.dot(toP) < 0) finish("Foul", "bad", nums());
+      if (off > 45 || rel.dot(toP) < 0) { atBat("foul"); finish("Foul", "bad", nums()); }
       else {
-        tally.h++; tally.best = Math.max(tally.best, d);
+        tally.h++; atBat("inplay");
         const L = sim.contact.launch;
         finish(L < 10 ? "Ground ball" : L < 25 ? "Line drive" : L < 50 ? "Fly ball" : "Pop up", "good", nums());
       }
     }
   }
 }
-function caught() {                                   // the ball stays in the mitt
-  sim.inMitt = true; heldAt.copy(ballPos()); catcherCatch(heldAt);
-  placeBall(heldAt, new THREE.Vector3());
+function gone() { sim.gone = true; placeBall(PARK, new THREE.Vector3()); }    // no catcher: the ball leaves play at the zone
+// the count: four balls walk, three strikes are out (a foul is a strike until there are two), three outs retire the side
+function atBat(kind) {
+  let end = "";
+  if (kind === "ball" && ++count.b === 4) end = "Walk";
+  if (kind === "strike" && ++count.s === 3) { end = "Strikeout"; count.outs++; }
+  if (kind === "foul" && count.s < 2) count.s++;
+  if (kind === "hbp") end = "Hit by pitch";
+  if (end || kind === "inplay") { count.b = 0; count.s = 0; }
+  if (count.outs === 3) { count.outs = 0; end += ", side retired"; }
+  drawTally();
+  return end;
+}
+// hit by pitch: the ball against the robot's limbs and trunk, as capsules between joint frames
+const HBP_SEGS = [["pelvis", "torso_link", 0.12], ["left_hip_pitch_link", "left_knee_link", 0.07], ["left_knee_link", "left_ankle_roll_link", 0.06],
+  ["right_hip_pitch_link", "right_knee_link", 0.07], ["right_knee_link", "right_ankle_roll_link", 0.06],
+  ["left_shoulder_roll_link", "left_elbow_link", 0.05], ["left_elbow_link", "left_wrist_yaw_link", 0.045],
+  ["right_shoulder_roll_link", "right_elbow_link", 0.05], ["right_elbow_link", "right_wrist_yaw_link", 0.045]].map(([a, b, r]) => [bodyId(a), bodyId(b), r]);
+const torsoId = bodyId("torso_link");
+function hitsBatter(bp) {
+  const P = (i) => new THREE.Vector3(data.xpos[i * 3], data.xpos[i * 3 + 1], data.xpos[i * 3 + 2]);
+  const near = (a, b, r) => { const ab = b.clone().sub(a), t = Math.max(0, Math.min(1, bp.clone().sub(a).dot(ab) / ab.lengthSq()));
+                              return a.clone().addScaledVector(ab, t).distanceTo(bp) < r + BALL_R; };
+  const t = P(torsoId), up = new THREE.Vector3(data.xmat[torsoId * 9 + 2], data.xmat[torsoId * 9 + 5], data.xmat[torsoId * 9 + 8]);
+  return near(t, t.clone().addScaledVector(up, 0.42), 0.11) || HBP_SEGS.some(([a, b, r]) => near(P(a), P(b), r));
 }
 
 // ---------- render loop ----------
@@ -975,10 +808,9 @@ function tick(now) {
   }
   const bp = ballPos();
   ball.position.copy(bp);
-  catcherUpdate(dt);
   if (sim.phase === "batted") followBall(bp);
   directCamera(dt);
-  if (sim.phase !== "idle" && sim.phase !== "pitch" && sim.phase !== "return" && !sim.inMitt && bp.z > -1 && bp.z < PARK.z - 1 && trailN < TRAIL) {
+  if (sim.phase !== "idle" && sim.phase !== "pitch" && !sim.gone && bp.z > -1 && bp.z < PARK.z - 1 && trailN < TRAIL) {
     trailPts.set([bp.x, bp.y, bp.z], trailN * 3); trailN++;
     trailGeo.setDrawRange(0, trailN); trailGeo.attributes.position.needsUpdate = true;
   }
@@ -991,7 +823,7 @@ function frame(now) {
 }
 // test hook: step the physics directly (a background tab gets no animation frames)
 window.cage = { get sim() { return sim; }, get parity() { return policy && policy.parity; }, setPolicy: (on) => { policyMode = on; }, pitch, setNoise: (on) => { noiseOn = on; }, setCam, pelvisZ: () => data.qpos[2], polContact: () => [polContact.toArray(), polContactT], setSpeed: (v) => { mph = v; showSpeed(); },
-                advance: (sec) => { for (let k = 0; k < sec / DT; k++) step(); catcherUpdate(sec); last = performance.now(); tick(last); return $("h-word").textContent; } };
+                advance: (sec) => { for (let k = 0; k < sec / DT; k++) step(); last = performance.now(); tick(last); return $("h-word").textContent; } };
 $("loading").hidden = true;
 $("pitch").disabled = false;
 drawTally();
