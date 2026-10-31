@@ -11,6 +11,18 @@
         "8080"
       ],
       "port": 8080
+    },
+    {
+      "name": "cage",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8765",
+        "--directory",
+        "web"
+      ],
+      "port": 8765
     }
   ]
 }

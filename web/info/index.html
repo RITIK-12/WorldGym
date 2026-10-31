@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>How WorldGym Was Built</title>
+<style>
+  /* Same night palette and liquid glass as the batting cage (ritik.io toolbar values). */
+  :root {
+    --night: #070d0a;
+    --ink: #f4f6f2;
+    --ink-dim: rgba(244, 246, 242, 0.62);
+    --glass-bg: rgba(23, 22, 26, 0.45);
+    --glass-stroke: rgba(255, 255, 255, 0.1);
+    --glass-highlight: rgba(255, 255, 255, 0.16);
+    --glass-shine: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 45%);
+    --glass-lift: 0 22px 60px -12px rgba(0, 0, 0, 0.6), 0 6px 18px rgba(0, 0, 0, 0.35);
+    --glass-blur: 30px;
+    --glass-saturate: 180%;
+    --ball: #ffb43a;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+    color-scheme: dark;
+  }
+  html, body { margin: 0; min-height: 100%; }
+  body { background: radial-gradient(ellipse at 50% -10%, #142422 0%, var(--night) 60%) fixed; color: var(--ink);
+         font-family: var(--font); -webkit-font-smoothing: antialiased; line-height: 1.6;
+         padding-block: calc(96px + env(safe-area-inset-top, 0px)) 64px;
+         padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  .glass { position: relative; background: var(--glass-bg); border-radius: 28px;
+           backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+           -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+           box-shadow: var(--glass-lift), inset 0 1px 0 var(--glass-highlight), inset 0 0 0 1px var(--glass-stroke); }
+  .glass::before { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; background: var(--glass-shine); }
+  nav { position: fixed; top: calc(16px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%);
+        display: flex; align-items: center; gap: 20px; padding: 10px 22px; border-radius: 999px; z-index: 10; }
+  nav a { color: var(--ink); text-decoration: none; font-weight: 600; font-size: 15px; }
+  nav a.back { color: var(--ball); }
+  main { max-width: 720px; margin: 0 auto; }
+  article { padding: 36px 40px; }
+  h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.1; letter-spacing: -0.02em; margin: 0 0 12px; text-wrap: balance; }
+  p { color: var(--ink-dim); margin: 0; max-width: 62ch; }
+  @media (max-width: 560px) { article { padding: 26px 22px; } }
+</style>
+</head>
+<body>
+<nav class="glass" aria-label="Site">
+  <a class="back" href="../">← Batting cage</a>
+  <a href="https://github.com/RITIK-12/WorldGym">GitHub</a>
+</nav>
+<main>
+  <article class="glass">
+    <h1>How WorldGym was built</h1>
+    <p>From one video of a real batter to a humanoid swinging a bat in physics. The full write-up goes here.</p>
+  </article>
+</main>
+</body>
+</html>

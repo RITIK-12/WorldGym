@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WorldGym Batting Cage</title>
+<meta name="description" content="A Unitree G1 humanoid swings a youth wood bat at machine pitches, with MuJoCo running in your browser. The swing is reconstructed from a real batter's video.">
+<style>
+  /* Night game. The field is the page; controls float on liquid glass. */
+  :root {
+    --night: #070d0a;
+    --glass: rgba(255, 255, 255, 0.075);
+    --glass-strong: rgba(255, 255, 255, 0.14);
+    --edge: rgba(255, 255, 255, 0.22);
+    --edge-soft: rgba(255, 255, 255, 0.08);
+    --ink: #f4f6f2;
+    --ink-dim: rgba(244, 246, 242, 0.62);
+    --ball: #ffb43a;
+    --good: #9ef0a4;
+    --bad: #ff9a85;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+    color-scheme: dark;
+  }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--night); color: var(--ink); font-family: var(--font); overflow: hidden;
+         -webkit-font-smoothing: antialiased; }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+  .glass {
+    position: relative; background: var(--glass); border: 1px solid var(--edge-soft);
+    -webkit-backdrop-filter: blur(22px) saturate(180%); backdrop-filter: blur(22px) saturate(180%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), inset 0 -1px 0 rgba(255, 255, 255, 0.04),
+                0 12px 40px rgba(0, 0, 0, 0.38);
+  }
+  .glass::before {                       /* specular sheen across the top edge */
+    content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0) 42%);
+    mask: linear-gradient(#000, #000); opacity: 0.9;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--ball); outline-offset: 3px; }
+  svg { display: block; }
+
+  .dock {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    display: flex; align-items: center; gap: 14px; padding: 10px 14px; border-radius: 999px;
+    max-width: calc(100vw - 32px);
+  }
+  .zone { display: grid; grid-template-columns: repeat(3, 13px); gap: 3px; padding: 6px; border-radius: 14px;
+          background: rgba(255, 255, 255, 0.05); }
+  .zone button { width: 13px; height: 13px; border-radius: 4px; background: rgba(255, 255, 255, 0.16); }
+  .zone button[aria-pressed="true"] { background: var(--ball); box-shadow: 0 0 10px rgba(255, 180, 58, 0.7); }
+  .speed { display: flex; align-items: center; gap: 6px; }
+  .speed button { width: 30px; height: 30px; border-radius: 50%; background: rgba(255, 255, 255, 0.08);
+                  display: grid; place-items: center; }
+  .speed output { min-width: 58px; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600;
+                  font-size: 19px; letter-spacing: -0.01em; }
+  .speed output small { font-size: 11px; font-weight: 500; color: var(--ink-dim); margin-left: 2px; }
+  #pitch { width: 62px; height: 62px; border-radius: 50%; display: grid; place-items: center;
+           background: radial-gradient(circle at 35% 30%, #fff9ec, #f1e6cf 55%, #d9c8a6);
+           box-shadow: inset 0 -3px 8px rgba(0, 0, 0, 0.25), 0 6px 22px rgba(255, 190, 90, 0.35);
+           transition: transform 0.12s ease; }
+  #pitch:active { transform: scale(0.94); }
+  #pitch:disabled { filter: grayscale(0.7) brightness(0.7); cursor: wait; }
+  .icon-btn { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center;
+              background: rgba(255, 255, 255, 0.06); color: var(--ink-dim); }
+  .icon-btn[aria-pressed="true"] { background: var(--glass-strong); color: var(--ball); }
+
+  .cams { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); top: 50%; transform: translateY(-50%);
+          display: grid; gap: 8px; padding: 8px; border-radius: 26px; }
+  .info { position: fixed; top: calc(16px + env(safe-area-inset-top, 0px)); right: max(16px, env(safe-area-inset-right, 0px));
+          width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; color: var(--ink);
+          text-decoration: none; font-weight: 600; font-size: 17px; }
+  .tally { position: fixed; top: calc(16px + env(safe-area-inset-top, 0px)); left: max(16px, env(safe-area-inset-left, 0px));
+           display: flex; gap: 14px; padding: 9px 16px; border-radius: 999px; font-variant-numeric: tabular-nums;
+           font-size: 14px; font-weight: 600; }
+  .tally span { display: flex; align-items: baseline; gap: 5px; }
+  .tally small { font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; color: var(--ink-dim); }
+
+  .hud { position: fixed; left: 50%; top: calc(18px + env(safe-area-inset-top, 0px)); transform: translate(-50%, -8px);
+         display: flex; align-items: center; gap: 18px; padding: 12px 22px; border-radius: 999px;
+         opacity: 0; transition: opacity 0.35s ease, transform 0.35s ease; pointer-events: none; }
+  .hud.show { opacity: 1; transform: translate(-50%, 0); }
+  .hud .word { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; }
+  .hud .word.good { color: var(--good); }
+  .hud .word.bad { color: var(--bad); }
+  .hud .nums { display: flex; gap: 16px; font-variant-numeric: tabular-nums; }
+  .hud .n { display: grid; gap: 1px; text-align: center; }
+  .hud .n b { font-size: 18px; font-weight: 650; }
+  .hud .n small { font-size: 10px; letter-spacing: 0.1em; color: var(--ink-dim); }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; background: var(--night); }
+  #loading .ring { width: 46px; height: 46px; border-radius: 50%; border: 3px solid rgba(255, 255, 255, 0.12);
+                   border-top-color: var(--ball); animation: spin 0.9s linear infinite; }
+  #loading p { position: absolute; top: calc(50% + 40px); color: var(--ink-dim); font-size: 13px; margin: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 640px) {
+    .dock { gap: 9px; padding: 8px 10px; }
+    #pitch { width: 54px; height: 54px; }
+    .speed output { min-width: 50px; font-size: 17px; }
+    .cams { top: auto; transform: none; bottom: calc(96px + env(safe-area-inset-bottom, 0px)); grid-auto-flow: column; }
+    .hud { gap: 12px; padding: 10px 16px; max-width: calc(100vw - 32px); }
+    .hud .word { font-size: 18px; }
+    .tally { top: calc(70px + env(safe-area-inset-top, 0px)); }
+  }
+  @media (prefers-reduced-motion: reduce) { .hud, #pitch { transition: none; } #loading .ring { animation: none; } }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="loading"><div class="ring" aria-hidden="true"></div><p id="load-msg">Loading physics</p></div>
+
+<div class="tally glass" id="tally" aria-label="Session totals">
+  <span><b id="t-p">0</b><small>P</small></span>
+  <span><b id="t-h">0</b><small>H</small></span>
+  <span><b id="t-hr">0</b><small>HR</small></span>
+  <span><b id="t-best">0</b><small>M</small></span>
+</div>
+
+<div class="hud glass" id="hud" aria-live="polite">
+  <span class="word" id="h-word">–</span>
+  <div class="nums">
+    <div class="n"><b id="h-exit">–</b><small>EV MPH</small></div>
+    <div class="n"><b id="h-la">–</b><small>LA</small></div>
+    <div class="n"><b id="h-dist">–</b><small>M</small></div>
+  </div>
+</div>
+
+<a class="info glass" href="info/" aria-label="How we built it">i</a>
+
+<nav class="cams glass" id="cams" aria-label="Camera">
+  <button class="icon-btn" data-cam="machine" aria-pressed="true" title="Behind the machine" aria-label="Behind the machine">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8" cy="9" r="4"/><circle cx="16" cy="9" r="4"/><path d="M12 13v8M7 21l5-8 5 8"/></svg>
+  </button>
+  <button class="icon-btn" data-cam="catcher" aria-pressed="false" title="Catcher" aria-label="Catcher view">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9a8 8 0 0 1 16 0v4a8 8 0 0 1-16 0z"/><path d="M4 12h16M9 5v14M15 5v14"/></svg>
+  </button>
+  <button class="icon-btn" data-cam="side" aria-pressed="false" title="Side" aria-label="Side view">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3"/></svg>
+  </button>
+  <button class="icon-btn" data-cam="top" aria-pressed="false" title="Overhead" aria-label="Overhead view">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l9 9-9 9-9-9z"/><circle cx="12" cy="12" r="2"/></svg>
+  </button>
+</nav>
+
+<div class="dock glass" role="toolbar" aria-label="Pitch controls">
+  <div class="zone" id="zone" role="group" aria-label="Pitch location"></div>
+  <div class="speed">
+    <button id="slower" aria-label="Slower pitch"><svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14"/></svg></button>
+    <output id="speed-out" aria-label="Pitch speed">45<small>mph</small></output>
+    <button id="faster" aria-label="Faster pitch"><svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14M12 5v14"/></svg></button>
+  </div>
+  <button id="pitch" disabled aria-label="Pitch">
+    <svg width="34" height="34" viewBox="0 0 40 40" fill="none" stroke="#c4312b" stroke-width="1.6" stroke-linecap="round">
+      <path d="M11 6c4 4 4 24 0 28" /><path d="M29 6c-4 4-4 24 0 28" />
+      <path d="M10.5 11l2.4-.8M11.6 15l2.5-.4M12 20h2.5M11.6 25l2.5.4M10.5 29l2.4.8"/>
+      <path d="M29.5 11l-2.4-.8M28.4 15l-2.5-.4M28 20h-2.5M28.4 25l-2.5.4M29.5 29l-2.4.8"/>
+    </svg>
+  </button>
+  <button class="icon-btn" id="auto" aria-pressed="false" title="Auto pitch" aria-label="Auto pitch">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg>
+  </button>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+               "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+// ---------- physical constants ----------
+const BALL_R = 0.0366, BALL_M = 0.145;             // regulation baseball
+const AIR = 1.225, CD = 0.35;                     // air density, baseball drag coefficient
+const COR = 0.50;                                 // wood bat on ball
+const DT = 0.002;                                 // physics step (s)
+const MOUND_M = 9.0;                              // batting-practice machine distance, behind an L-screen
+const FENCE_M = 12.5, FENCE_H = 1.2;              // robot-scale field: a 1.3 m robot swinging at a third of human bat speed
+const RELEASE_Z = 1.02;                           // the machine's wheel gap
+const MPH = 0.44704;
+
+const $ = (id) => document.getElementById(id);
+const loadMsg = $("load-msg");
+
+// ---------- load physics, meshes, swing ----------
+const get = (u) => fetch(u, { cache: "no-cache" });
+const [xml, vis, sw] = await Promise.all([
+  get("assets/cage.xml").then((r) => r.text()),
+  get("assets/visuals.json").then((r) => r.json()),
+  get("assets/swing.json").then((r) => r.json()),
+]);
+const bin = Uint8Array.from(atob(vis.blob), (ch) => ch.charCodeAt(0)).buffer;   // float32 positions, then uint32 indices
+let mj;
+try {
+  const wasm = await (await get("vendor/mujoco.wasm")).arrayBuffer();
+  const { default: loadMujoco } = await import("./vendor/mujoco.js");
+  mj = await loadMujoco({ wasmBinary: wasm });
+} catch (e) {
+  loadMsg.textContent = "This browser could not start the physics engine: " + (e.message || e);
+  throw e;
+}
+const model = mj.MjModel.from_xml_string(xml);
+const data = new mj.MjData(model);
+model.opt.timestep = DT;
+const BODY = mj.mjtObj.mjOBJ_BODY.value;
+const bodyId = (n) => mj.mj_name2id(model, BODY, n);
+const NQ_ROBOT = sw.nq;
+const ballBody = bodyId("ball");
+const batBody = bodyId("bat");
+const ballQ = NQ_ROBOT, ballV = NQ_ROBOT - 1;       // ball free joint follows the robot's joints
+const swingQ = new Float64Array(sw.qpos);
+const T_CONTACT = sw.contact_frame / sw.hz;
+const toP = new THREE.Vector3(...sw.to_pitcher);    // MuJoCo frame (z up), from the plate toward the machine
+const side = new THREE.Vector3(-toP.y, toP.x, 0);
+const contact = new THREE.Vector3(...sw.sweet_spot);
+const plate = new THREE.Vector3(contact.x, contact.y, 0).addScaledVector(toP, -0.25);
+const mound = plate.clone().addScaledVector(toP, MOUND_M);
+const release = mound.clone().addScaledVector(toP, -0.26).setZ(RELEASE_Z);
+const capsules = sw.bat.capsules;                   // [z0, z1, r] along the bat's +z
+
+// ---------- scene: MuJoCo is z-up; one root group turns it into three's y-up ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.85;
+$("stage").appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#070d0a");
+scene.fog = new THREE.Fog("#070d0a", 26, 60);
+const world = new THREE.Group();
+world.rotation.x = -Math.PI / 2;
+scene.add(world);
+const camera = new THREE.PerspectiveCamera(32, 1, 0.05, 200);
+{ // night sky: deep blue at the zenith fading to the stadium haze at the horizon
+  const c = document.createElement("canvas"); c.width = 2; c.height = 256;
+  const g = c.getContext("2d"), grad = g.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0, "#05080f"); grad.addColorStop(0.62, "#0c1626"); grad.addColorStop(1, "#1b2b2a");
+  g.fillStyle = grad; g.fillRect(0, 0, 2, 256);
+  scene.background = new THREE.CanvasTexture(c);
+  scene.fog.color.set("#13201f");
+}
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.49;
+
+scene.add(new THREE.HemisphereLight("#cfe3ff", "#14261a", 0.4));
+const key = new THREE.DirectionalLight("#fff3d6", 1.7);            // light tower behind first base
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, { left: -3, right: 3, top: 3, bottom: -3, near: 1, far: 30 });
+scene.add(key);
+scene.add(key.target);
+const rim = new THREE.DirectionalLight("#a9c8ff", 0.7);
+scene.add(rim);
+
+const ang = Math.atan2(toP.y, toP.x);
+function stripes() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 1024;
+  const g = c.getContext("2d");
+  for (let i = 0; i < 16; i++) { g.fillStyle = i % 2 ? "#285a33" : "#2e6539"; g.fillRect(0, i * 64, 1024, 64); }
+  return new THREE.CanvasTexture(c);
+}
+const grass = new THREE.Mesh(new THREE.CircleGeometry(55, 96), new THREE.MeshStandardMaterial({ map: stripes(), roughness: 0.95 }));
+grass.receiveShadow = true; grass.position.set(plate.x, plate.y, -0.002); grass.rotation.z = ang; world.add(grass);
+const clay = new THREE.MeshStandardMaterial({ color: "#8f6040", roughness: 1 });
+const disc = (r, p) => { const m = new THREE.Mesh(new THREE.CircleGeometry(r, 64), clay); m.position.set(p.x, p.y, 0.001); m.receiveShadow = true; world.add(m); };
+disc(2.6, plate); disc(2.3, mound);
+const infield = new THREE.Mesh(new THREE.RingGeometry(MOUND_M * 0.97, MOUND_M * 1.5, 64, 1, ang - Math.PI / 4, Math.PI / 2), clay);
+infield.position.set(plate.x, plate.y, 0.0005); infield.receiveShadow = true; world.add(infield);
+const chalk = new THREE.MeshBasicMaterial({ color: "#efeadf" });
+for (const s of [-1, 1]) {
+  const a = ang + s * Math.PI / 4, L = FENCE_M + 0.5;
+  const line = new THREE.Mesh(new THREE.PlaneGeometry(L, 0.05), chalk);
+  line.position.set(plate.x + Math.cos(a) * L / 2, plate.y + Math.sin(a) * L / 2, 0.003); line.rotation.z = a; world.add(line);
+}
+const plateMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.012, 5), new THREE.MeshStandardMaterial({ color: "#f3efe6" }));
+plateMesh.rotation.x = Math.PI / 2; plateMesh.rotation.y = ang + Math.PI / 2; plateMesh.position.set(plate.x, plate.y, 0.006); world.add(plateMesh);
+const wallMat = new THREE.MeshStandardMaterial({ color: "#10301f", roughness: 0.85 });
+const capMat = new THREE.MeshBasicMaterial({ color: "#ffb43a" });
+const PANELS = 48, ARC = Math.PI / 2, panelW = FENCE_M * ARC / PANELS + 0.02;
+for (let k = 0; k < PANELS; k++) {
+  const a = ang - ARC / 2 + (k + 0.5) * ARC / PANELS;
+  const x = plate.x + Math.cos(a) * FENCE_M, y = plate.y + Math.sin(a) * FENCE_M;
+  const p = new THREE.Mesh(new THREE.BoxGeometry(0.12, panelW, FENCE_H), wallMat); p.position.set(x, y, FENCE_H / 2); p.rotation.z = a; world.add(p);
+  const c = new THREE.Mesh(new THREE.BoxGeometry(0.14, panelW, 0.05), capMat); c.position.set(x, y, FENCE_H + 0.025); c.rotation.z = a; world.add(c);
+}
+
+// ---------- the pitching machine: tripod, two counter-rotating wheels, chute and a hopper of balls ----------
+const machine = new THREE.Group();
+const steel = new THREE.MeshStandardMaterial({ color: "#5d6b74", metalness: 0.7, roughness: 0.35 });
+const dark = new THREE.MeshStandardMaterial({ color: "#1c2226", metalness: 0.4, roughness: 0.5 });
+const tire = new THREE.MeshStandardMaterial({ color: "#121212", roughness: 0.9 });
+const hide = new THREE.MeshStandardMaterial({ color: "#f3efe4", roughness: 0.6 });
+const cyl = (r, h, mat) => new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 20), mat);
+for (let k = 0; k < 3; k++) {                         // tripod legs from a hub at 0.78 m
+  const a = (k / 3) * Math.PI * 2 + 0.5, foot = new THREE.Vector3(Math.cos(a) * 0.5, Math.sin(a) * 0.5, 0), hub = new THREE.Vector3(0, 0, 0.78);
+  const leg = cyl(0.018, foot.distanceTo(hub), steel);
+  leg.position.copy(foot.clone().add(hub).multiplyScalar(0.5));
+  leg.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), hub.clone().sub(foot).normalize());
+  machine.add(leg);
+}
+const post = cyl(0.03, 0.2, steel); post.rotation.x = Math.PI / 2; post.position.z = 0.88; machine.add(post);
+const yoke = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.62, 0.05), dark); yoke.position.set(0, 0, 0.96); machine.add(yoke);
+const wheels = [];
+for (const s of [-1, 1]) {                            // wheel axes vertical, the ball squeezes through the gap
+  const w = new THREE.Group();
+  const t = cyl(0.19, 0.06, tire); t.rotation.x = Math.PI / 2; w.add(t);
+  const hubcap = cyl(0.07, 0.065, steel); hubcap.rotation.x = Math.PI / 2; w.add(hubcap);
+  for (let k = 0; k < 4; k++) { const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.02, 0.066), steel); spoke.rotation.z = k * Math.PI / 4; w.add(spoke); }
+  w.position.set(0, s * (0.19 + BALL_R * 0.8), RELEASE_Z); w.userData.dir = s;
+  machine.add(w); wheels.push(w);
+  const motor = cyl(0.06, 0.14, dark); motor.rotation.x = Math.PI / 2; motor.position.set(0, s * (0.19 + BALL_R * 0.8), RELEASE_Z + 0.1); machine.add(motor);
+}
+const chute = cyl(0.045, 0.62, steel);
+chute.position.set(0.32, 0, RELEASE_Z + 0.2); chute.rotation.y = -0.85; machine.add(chute);
+const hopper = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.13, 0.22, 20, 1, true), new THREE.MeshStandardMaterial({ color: "#2f3a40", side: THREE.DoubleSide, metalness: 0.5, roughness: 0.5 }));
+hopper.rotation.x = Math.PI / 2; hopper.position.set(0.56, 0, RELEASE_Z + 0.48); machine.add(hopper);
+for (let k = 0; k < 9; k++) {
+  const b = new THREE.Mesh(new THREE.SphereGeometry(BALL_R, 14, 10), hide);
+  b.position.set(0.56 + Math.cos(k * 2.1) * 0.09 * (k % 3), Math.sin(k * 2.1) * 0.09 * (k % 3), RELEASE_Z + 0.52 + 0.05 * Math.floor(k / 3));
+  machine.add(b);
+}
+{ // L-screen in front of the machine: a padded frame with a net
+  const screen = new THREE.Group();
+  const pipe = new THREE.MeshStandardMaterial({ color: "#20262a", metalness: 0.5, roughness: 0.5 });
+  const net = new THREE.MeshStandardMaterial({ color: "#0d1012", transparent: true, opacity: 0.55, side: THREE.DoubleSide });
+  const W = 1.5, H = 2.0;
+  for (const [x0, z0, x1, z1] of [[-W / 2, 0, -W / 2, H], [W / 2, 0, W / 2, 1.0], [-W / 2, H, 0, H], [0, H, 0, 1.0], [0, 1.0, W / 2, 1.0], [-W / 2, 0.02, W / 2, 0.02]]) {
+    const len = Math.hypot(x1 - x0, z1 - z0), p = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, len, 10), pipe);
+    p.position.set(0, (x0 + x1) / 2, (z0 + z1) / 2); p.rotation.x = Math.atan2(x1 - x0, z1 - z0) * -1; screen.add(p);
+  }
+  const lower = new THREE.Mesh(new THREE.PlaneGeometry(W, 1.0), net); lower.rotation.x = Math.PI / 2; lower.rotation.y = Math.PI / 2; lower.position.set(0, 0, 0.5); screen.add(lower);
+  const upper = new THREE.Mesh(new THREE.PlaneGeometry(W / 2, 1.0), net); upper.rotation.x = Math.PI / 2; upper.rotation.y = Math.PI / 2; upper.position.set(0, -W / 4, 1.5); screen.add(upper);
+  screen.position.set(mound.x - toP.x * 1.1, mound.y - toP.y * 1.1, 0);
+  screen.rotation.z = ang;
+  screen.traverse((o) => { o.castShadow = true; });
+  world.add(screen);
+}
+machine.position.set(mound.x, mound.y, 0);
+machine.rotation.z = ang;                             // local +x points away from the plate, so the wheel gap faces it
+machine.traverse((o) => { o.castShadow = true; });
+world.add(machine);
+
+// ---------- robot and bat, one mesh per body, posed from MuJoCo every frame ----------
+const pos = new Float32Array(bin, 0, vis.positions_bytes / 4);
+const idx = new Uint32Array(bin, vis.positions_bytes);
+const bodies = [];
+for (const b of vis.bodies) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(pos.slice(b.vofs * 3, (b.vofs + b.vcount) * 3), 3));
+  g.setIndex(new THREE.BufferAttribute(idx.slice(b.iofs, b.iofs + b.icount), 1));
+  g.computeVertexNormals();
+  const [r, gg, bb] = b.rgba, isBat = b.name === "bat";
+  const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: new THREE.Color(r, gg, bb).multiplyScalar(isBat ? 1 : 1.25),
+                                                                  metalness: isBat ? 0 : 0.3, roughness: isBat ? 0.55 : 0.42 }));
+  mesh.castShadow = true;
+  world.add(mesh);
+  bodies.push({ id: bodyId(b.name), mesh });
+}
+const ball = new THREE.Mesh(new THREE.SphereGeometry(BALL_R, 24, 16), hide);
+ball.castShadow = true; world.add(ball);
+const TRAIL = 500, trailPts = new Float32Array(TRAIL * 3);
+const trailGeo = new THREE.BufferGeometry(); trailGeo.setAttribute("position", new THREE.BufferAttribute(trailPts, 3));
+world.add(new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ color: "#ffb43a", transparent: true, opacity: 0.8 })));
+let trailN = 0;
+
+// lights follow the batter
+const toThree = (v) => new THREE.Vector3(v.x, v.z, -v.y);
+key.position.copy(toThree(plate.clone().addScaledVector(side, 6).addScaledVector(toP, 3).setZ(9)));
+key.target.position.copy(toThree(plate));
+rim.position.copy(toThree(plate.clone().addScaledVector(toP, -6).addScaledVector(side, -4).setZ(5)));
+
+// ---------- cameras ----------
+const CAMS = {
+  machine: () => [mound.clone().addScaledVector(toP, 2.4).setZ(1.85), plate.clone().addScaledVector(toP, 0.5).setZ(0.8)],
+  catcher: () => [plate.clone().addScaledVector(toP, -3.0).setZ(1.35), plate.clone().addScaledVector(toP, 6).setZ(1.0)],
+  side: () => [plate.clone().addScaledVector(side, -5.2).addScaledVector(toP, 1.4).setZ(1.4), plate.clone().addScaledVector(toP, 0.4).setZ(0.8)],
+  top: () => [plate.clone().addScaledVector(toP, 5.5).setZ(15), plate.clone().addScaledVector(toP, 6)],
+};
+function setCam(name) {
+  const [eye, at] = CAMS[name]();
+  camera.position.copy(toThree(eye)); controls.target.copy(toThree(at)); controls.update();
+  for (const b of $("cams").children) b.setAttribute("aria-pressed", String(b.dataset.cam === name));
+}
+$("cams").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setCam(b.dataset.cam); });
+setCam("machine");
+function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); }
+addEventListener("resize", resize); resize();
+
+// ---------- controls ----------
+const ZONE = [];
+let zoneSel = 4, mph = 45;
+for (let k = 0; k < 9; k++) {
+  const b = document.createElement("button");
+  b.setAttribute("aria-label", `${["high", "middle", "low"][Math.floor(k / 3)]} ${["inside", "middle", "away"][k % 3]}`);
+  b.setAttribute("aria-pressed", String(k === zoneSel));
+  b.addEventListener("click", () => { zoneSel = k; ZONE.forEach((z, j) => z.setAttribute("aria-pressed", String(j === k))); });
+  $("zone").appendChild(b); ZONE.push(b);
+}
+const showSpeed = () => { $("speed-out").innerHTML = `${mph}<small>mph</small>`; };
+$("slower").addEventListener("click", () => { mph = Math.max(25, mph - 5); showSpeed(); });
+$("faster").addEventListener("click", () => { mph = Math.min(65, mph + 5); showSpeed(); });
+
+// ---------- robot pose from the swing ----------
+function setSwing(t) {
+  const f = Math.max(0, Math.min(sw.frames - 1.001, t * sw.hz));
+  const i = Math.floor(f), a = f - i, n = NQ_ROBOT, q = data.qpos;
+  for (let j = 0; j < n; j++) q[j] = swingQ[i * n + j] * (1 - a) + swingQ[(i + 1) * n + j] * a;
+  let norm = 0;
+  for (let j = 3; j < 7; j++) norm += q[j] * q[j];
+  norm = Math.sqrt(norm);
+  for (let j = 3; j < 7; j++) q[j] /= norm;
+  const v = data.qvel;
+  for (let j = 0; j < NQ_ROBOT - 1; j++) v[j] = 0;
+}
+
+// ---------- ball flight ----------
+function placeBall(p, v) {
+  const q = data.qpos, w = data.qvel;
+  q[ballQ] = p.x; q[ballQ + 1] = p.y; q[ballQ + 2] = p.z; q[ballQ + 3] = 1; q[ballQ + 4] = 0; q[ballQ + 5] = 0; q[ballQ + 6] = 0;
+  w[ballV] = v.x; w[ballV + 1] = v.y; w[ballV + 2] = v.z; w[ballV + 3] = 0; w[ballV + 4] = 0; w[ballV + 5] = 0;
+}
+const ballPos = () => new THREE.Vector3(data.qpos[ballQ], data.qpos[ballQ + 1], data.qpos[ballQ + 2]);
+const ballVel = () => new THREE.Vector3(data.qvel[ballV], data.qvel[ballV + 1], data.qvel[ballV + 2]);
+const drag = (v) => v.clone().multiplyScalar(-0.5 * AIR * CD * Math.PI * BALL_R * BALL_R * v.length() / BALL_M);
+function fly(from, v0, target) {
+  const p = from.clone(), v = v0.clone();
+  for (let t = DT; t < 3; t += DT) {
+    v.add(new THREE.Vector3(0, 0, -9.81).add(drag(v)).multiplyScalar(DT));
+    p.addScaledVector(v, DT);
+    if (p.clone().sub(target).dot(toP) <= 0) return { p, t };
+  }
+  return null;
+}
+function aim(from, target, speed) {                   // shooting method: correct the aim point until the ball crosses the target
+  const aimAt = target.clone();
+  let v = aimAt.clone().sub(from).normalize().multiplyScalar(speed), T = 0;
+  for (let it = 0; it < 12; it++) {
+    const hit = fly(from, v, target);
+    if (!hit) break;
+    T = hit.t;
+    const err = target.clone().sub(hit.p);
+    if (err.length() < 0.003) break;
+    aimAt.add(err);
+    v = aimAt.clone().sub(from).normalize().multiplyScalar(speed);
+  }
+  return { v, T };
+}
+
+// ---------- bat-ball impulse: restitution with the bat's effective mass at the impact point ----------
+const bat = { m: model.body_mass[batBody], I: model.body_inertia[batBody * 3], zc: model.body_ipos[batBody * 3 + 2] };
+function batFrame() {
+  return { p: new THREE.Vector3(data.xpos[batBody * 3], data.xpos[batBody * 3 + 1], data.xpos[batBody * 3 + 2]),
+           q: new THREE.Quaternion(data.xquat[batBody * 4 + 1], data.xquat[batBody * 4 + 2], data.xquat[batBody * 4 + 3], data.xquat[batBody * 4]) };
+}
+const local = (f, z) => new THREE.Vector3(0, 0, z).applyQuaternion(f.q).add(f.p);
+function collide(prev, now, bp, bv) {
+  for (const [z0, z1, r] of capsules) {
+    const a = local(now, z0), ab = local(now, z1).sub(a);
+    const s = Math.max(0, Math.min(1, bp.clone().sub(a).dot(ab) / ab.lengthSq()));
+    const c = a.clone().addScaledVector(ab, s), n = bp.clone().sub(c), dist = n.length();
+    if (dist > r + BALL_R) continue;
+    n.divideScalar(dist || 1);
+    const z = z0 + s * (z1 - z0);
+    const vRel = bv.clone().sub(c.clone().sub(local(prev, z)).divideScalar(DT));
+    const vn = vRel.dot(n);
+    if (vn >= 0) continue;
+    const arm = z - bat.zc, invMeff = 1 / bat.m + arm * arm / bat.I;
+    const J = -(1 + COR) * vn / (1 / BALL_M + invMeff);
+    const out = bv.clone().addScaledVector(n, J / BALL_M).addScaledVector(vRel.clone().addScaledVector(n, -vn), -0.1);
+    bp.copy(c).addScaledVector(n, r + BALL_R + 0.001);
+    return out;
+  }
+  return null;
+}
+
+// ---------- game ----------
+// The robot times its swing from the ball's launch and speed; its timing scatters like a good hitter's (~7 ms).
+let TIMING_SD = 0.007, noiseOn = true;
+const noise = (sd) => noiseOn ? sd * Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random()) : 0;
+const tally = { p: 0, h: 0, hr: 0, best: 0 };
+const drawTally = () => { $("t-p").textContent = tally.p; $("t-h").textContent = tally.h; $("t-hr").textContent = tally.hr; $("t-best").textContent = tally.best.toFixed(1); };
+let hudTimer = 0;
+function hud(word, kind, nums) {
+  $("h-word").textContent = word; $("h-word").className = "word " + (kind || "");
+  $("h-exit").textContent = nums ? nums[0] : "–"; $("h-la").textContent = nums ? nums[1] : "–"; $("h-dist").textContent = nums ? nums[2] : "–";
+  $("hud").classList.add("show");
+  clearTimeout(hudTimer); hudTimer = setTimeout(() => $("hud").classList.remove("show"), 3800);
+}
+let sim = { t: 0, swingAt: Infinity, launchAt: Infinity, phase: "idle", contact: null, landed: false };
+let wheelSpin = 4;
+placeBall(new THREE.Vector3(0, 0, -5), new THREE.Vector3());
+setSwing(0);
+mj.mj_forward(model, data);
+
+function pitch() {
+  if (sim.phase === "pitch" || sim.phase === "flight" || sim.phase === "batted") return;
+  const speed = mph * MPH;
+  const row = Math.floor(zoneSel / 3), col = zoneSel % 3;
+  const target = contact.clone()
+    .add(new THREE.Vector3(0, 0, (1 - row) * 0.09))
+    .addScaledVector(side, (col - 1) * 0.07 * (sw.top_hand === "left" ? -1 : 1))
+    .add(new THREE.Vector3(noise(0.015), noise(0.015), noise(0.015)));     // the machine scatters about 1.5 cm
+  const { v, T } = aim(release, target, speed);
+  const lead = Math.max(0.35, T_CONTACT - T + 0.2);
+  sim = { t: 0, launchAt: lead, swingAt: lead + T - T_CONTACT + noise(TIMING_SD), phase: "pitch", contact: null, landed: false, v };
+  tally.p++; drawTally();
+  $("pitch").disabled = true;
+  trailN = 0; trailGeo.setDrawRange(0, 0);
+}
+$("pitch").addEventListener("click", pitch);
+addEventListener("keydown", (e) => { if (e.code === "Space") { e.preventDefault(); pitch(); } });
+let autoTimer = 0;
+$("auto").addEventListener("click", () => {
+  const on = $("auto").getAttribute("aria-pressed") !== "true";
+  $("auto").setAttribute("aria-pressed", String(on));
+  if (on && sim.phase !== "pitch" && sim.phase !== "flight" && sim.phase !== "batted") pitch();
+});
+function finish(word, kind, nums) {
+  hud(word, kind, nums); drawTally(); sim.phase = "done";
+  setTimeout(() => { $("pitch").disabled = false; }, 500);
+  clearTimeout(autoTimer);
+  if ($("auto").getAttribute("aria-pressed") === "true") autoTimer = setTimeout(pitch, 2600);
+}
+
+function step() {
+  const prev = batFrame();
+  sim.t += DT;
+  setSwing(Math.max(0, sim.t - sim.swingAt));
+  if (sim.phase === "pitch" && sim.t >= sim.launchAt) { placeBall(release, sim.v); sim.phase = "flight"; wheelSpin = 60; }
+  if (sim.phase === "flight" || sim.phase === "batted") {
+    const f = drag(ballVel()).multiplyScalar(BALL_M);
+    data.xfrc_applied[ballBody * 6] = f.x; data.xfrc_applied[ballBody * 6 + 1] = f.y; data.xfrc_applied[ballBody * 6 + 2] = f.z;
+  }
+  mj.mj_step(model, data);
+  if (sim.phase !== "flight" && sim.phase !== "batted") return;
+  const now = batFrame(), bp = ballPos(), bv = ballVel();
+  if (sim.phase === "flight") {
+    const out = collide(prev, now, bp, bv);
+    if (out) {
+      placeBall(bp, out);
+      const s = out.length(), launch = Math.atan2(out.z, Math.hypot(out.x, out.y)) * 180 / Math.PI;
+      sim.contact = { s, launch }; sim.phase = "batted"; trailN = 0;
+    } else if (bp.clone().sub(plate).dot(toP) < -1.0) {
+      finish("Swing and miss", "bad");
+    }
+  } else {
+    const rel = bp.clone().sub(plate), d = Math.hypot(rel.x, rel.y);
+    const off = Math.abs(Math.atan2(toP.x * rel.y - toP.y * rel.x, rel.x * toP.x + rel.y * toP.y)) * 180 / Math.PI;
+    const nums = () => [(sim.contact.s / MPH).toFixed(0), `${sim.contact.launch.toFixed(0)}°`, d.toFixed(1)];
+    if (!sim.landed && d >= FENCE_M && bp.z > FENCE_H && off <= 45) {
+      sim.landed = true; tally.hr++; tally.h++; tally.best = Math.max(tally.best, d); finish("Home run", "good", nums());
+    } else if (!sim.landed && bp.z <= BALL_R + 0.005 && bv.z <= 0) {
+      sim.landed = true;
+      if (off > 45 || rel.dot(toP) < 0) finish("Foul", "bad", nums());
+      else {
+        tally.h++; tally.best = Math.max(tally.best, d);
+        const L = sim.contact.launch;
+        finish(L < 10 ? "Ground ball" : L < 25 ? "Line drive" : L < 50 ? "Fly ball" : "Pop up", "good", nums());
+      }
+    }
+  }
+}
+
+// ---------- render loop ----------
+let last = performance.now(), acc = 0;
+function tick(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  acc += dt; last = now;
+  while (acc >= DT) { step(); acc -= DT; }
+  wheelSpin += (8 - wheelSpin) * Math.min(1, dt * 1.5);
+  for (const w of wheels) w.rotation.z += w.userData.dir * wheelSpin * dt;
+  mj.mj_kinematics(model, data);
+  for (const b of bodies) {
+    const i = b.id;
+    b.mesh.position.set(data.xpos[i * 3], data.xpos[i * 3 + 1], data.xpos[i * 3 + 2]);
+    b.mesh.quaternion.set(data.xquat[i * 4 + 1], data.xquat[i * 4 + 2], data.xquat[i * 4 + 3], data.xquat[i * 4]);
+  }
+  const bp = ballPos();
+  ball.position.copy(bp);
+  if (sim.phase !== "idle" && sim.phase !== "pitch" && bp.z > -1 && trailN < TRAIL) {
+    trailPts.set([bp.x, bp.y, bp.z], trailN * 3); trailN++;
+    trailGeo.setDrawRange(0, trailN); trailGeo.attributes.position.needsUpdate = true;
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
+function frame(now) {
+  try { tick(now); } catch (e) { loadMsg.textContent = "Simulation stopped: " + (e.message || e); $("loading").hidden = false; console.error(e); return; }
+  requestAnimationFrame(frame);
+}
+// test hook: step the physics directly (a background tab gets no animation frames)
+window.cage = { get sim() { return sim; }, pitch, setNoise: (on) => { noiseOn = on; }, setSpeed: (v) => { mph = v; showSpeed(); },
+                advance: (sec) => { for (let k = 0; k < sec / DT; k++) step(); last = performance.now(); tick(last); return $("h-word").textContent; } };
+$("loading").hidden = true;
+$("pitch").disabled = false;
+drawTally();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

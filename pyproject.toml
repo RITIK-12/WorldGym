@@ -4,17 +4,21 @@ version = "0.1.0"
 description = "One robot video in: a measured MuJoCo twin, a benchmark that breaks it, and a policy that survives it."
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=2.3.0",
     "google-genai>=2.3.0",
     "imageio>=2.38.1",
     "imageio-ffmpeg>=0.6.0",
     "mujoco>=3.17.0",
     "numpy>=2.5.4",
+    "onnxruntime>=1.31.1",
     "opencv-python>=5.0.0.93",
+    "osam[cpu]>=0.9.2",
     "pillow>=13.0.0",
     "plotly>=7.1.0",
     "pydantic>=2.14.1",
     "python-dotenv>=1.2.4",
     "scipy>=1.18.1",
+    "torch>=2.15.0",
     "usd-core>=26.11",
     "viser>=1.1.1",
 ]
